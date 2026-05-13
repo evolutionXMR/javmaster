@@ -22,3 +22,6 @@ __pycache__/
 # Local backups
 *.bak
 *.bak_*
+# Local private notes/config
+discordbotCONFIG.txt
+docs/plans/
