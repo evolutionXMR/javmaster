@@ -1,0 +1,16 @@
+services:
+  download-bot:
+    build: .
+    image: javmaster:local
+    container_name: ${CONTAINER_NAME:-javmaster}
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Australia/Sydney}
+    ports:
+      - "${WEB_PORT:-18080}:18080"
+    volumes:
+      - ${DATA_DIR_HOST:-./data}:/app/data
+      - ${DOWNLOADS_HOST:-./downloads}:/downloads

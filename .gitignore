@@ -1,0 +1,24 @@
+# Secrets / local runtime
+.env
+.env.*
+!.env.example
+config.local.py
+
+# Runtime data
+*.json
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local backups
+*.bak
+*.bak_*

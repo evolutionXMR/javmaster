@@ -1,0 +1,5 @@
+aiohttp>=3.9,<4
+discord.py>=2.3,<3
+fastapi>=0.110,<1
+pydantic>=2,<3
+uvicorn[standard]>=0.27,<1
