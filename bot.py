@@ -7,10 +7,8 @@ import os
 import json
 import xml.etree.ElementTree as ET
 import re
-import datetime
 import html
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
 
 # 【核心改动】从 config.py 导入所有配置参数
 try:
@@ -30,8 +28,8 @@ class DownloadBot(discord.Client):
     async def setup_hook(self):
         await self.tree.sync()
         print("✅ Slash commands synced!")
-        if not daily_auto_check.is_running():
-            daily_auto_check.start()
+        if not code_search_scheduler.is_running():
+            code_search_scheduler.start()
 
 bot = DownloadBot()
 
@@ -396,7 +394,10 @@ async def perform_nyaa_check():
                     if candidates:
                         candidates.sort(key=lambda x: x['score'], reverse=True)
                         best_match = candidates[0]
-                        res = await gopeed_api("tasks", method="POST", data={"req": {"url": best_match['link']}})
+                        # Use app_core so scheduled / manual Discord checks share the same
+                        # Gopeed URL, token, and download path from the Web settings page.
+                        import app_core
+                        res = await app_core.push_resource_to_gopeed(best_match['link'])
                         if res and res.get('code') == 0:
                             bot_tasks[res.get('data')] = code 
                             tag_info = []
@@ -418,16 +419,35 @@ async def perform_nyaa_check():
 
 # ================= 定时与指令 =================
 
-SYDNEY_TZ = ZoneInfo("Australia/Sydney")
-TIME_TO_RUN = datetime.time(hour=2, minute=0, tzinfo=SYDNEY_TZ)
-
-@tasks.loop(time=TIME_TO_RUN)
-async def daily_auto_check():
-    pushed, logs = await perform_nyaa_check()
+async def send_code_check_report(pushed, logs, title=None):
     channel = bot.get_channel(REPORT_CHANNEL_ID)
-    if channel:
-        report = f"**🕒 夜间检查报告**\n" + "\n".join(logs) if pushed > 0 else f"**💤 自动检查完毕，今夜无新货。**\n" + "\n".join(logs)
-        await channel.send(report[:1990])
+    if not channel:
+        return
+    if title:
+        report = f"**{title}**\n" + "\n".join(logs)
+    elif pushed > 0:
+        report = f"**🕒 自动番号检查报告**\n" + "\n".join(logs)
+    else:
+        report = f"**💤 自动番号检查完毕，无新货。**\n" + "\n".join(logs)
+    await channel.send(report[:1990])
+
+
+@tasks.loop(minutes=1)
+async def code_search_scheduler():
+    """Settings-driven replacement for the old hardcoded 02:00 bot check."""
+    import app_core
+    settings = await app_core.get_settings()
+    state = await app_core.get_resource_state()
+    if not app_core.scheduler_due(settings, state, "code_search"):
+        return
+    pushed, logs = await perform_nyaa_check()
+    await app_core.scheduler_mark_run("code_search")
+    await send_code_check_report(pushed, logs)
+
+
+@code_search_scheduler.before_loop
+async def before_code_search_scheduler():
+    await bot.wait_until_ready()
 
 @bot.tree.command(name="add", description="批量添加代号")
 async def add_code(interaction: discord.Interaction, code: str):

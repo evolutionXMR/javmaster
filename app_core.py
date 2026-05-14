@@ -6,6 +6,8 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from urllib.parse import quote
 
 import aiohttp
@@ -443,6 +445,36 @@ async def get_resource_state():
     return data
 
 
+SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+
+
+def scheduler_now():
+    return datetime.now(SYDNEY_TZ)
+
+
+def scheduler_due(settings, state, prefix):
+    """Return True when a configured scheduler prefix is due.
+
+    Shared by the Web GUI background loop and Discord bot so the settings page is
+    the single source of truth for scheduled checks.
+    """
+    if not settings.get(f"{prefix}_enabled"):
+        return False
+    mode = str(settings.get(f"{prefix}_schedule_mode") or "interval")
+    last = (state.get("scheduler") or {}).get(prefix) or {}
+    now = scheduler_now()
+    now_ts = int(now.timestamp())
+    if mode == "daily":
+        target = str(settings.get(f"{prefix}_daily_time") or "09:00")[:5]
+        today = now.strftime("%Y-%m-%d")
+        return last.get("last_date") != today and now.strftime("%H:%M") >= target
+    try:
+        hours = float(settings.get(f"{prefix}_interval_hours") or 6)
+    except Exception:
+        hours = 6
+    return not last.get("last_run") or now_ts - int(last.get("last_run") or 0) >= max(1, hours) * 3600
+
+
 async def refresh_code_resources(code=None):
     codes = [code.upper()] if code else await get_code_watchlist()
     state = await get_resource_state()
@@ -521,7 +553,8 @@ async def refresh_actress_works():
 
 async def scheduler_mark_run(prefix):
     state = await get_resource_state()
-    state.setdefault("scheduler", {})[prefix] = {"last_run": int(time.time()), "last_date": time.strftime("%Y-%m-%d")}
+    now = scheduler_now()
+    state.setdefault("scheduler", {})[prefix] = {"last_run": int(now.timestamp()), "last_date": now.strftime("%Y-%m-%d")}
     await save_json(RESOURCE_STATE_FILE, state)
     return state["scheduler"][prefix]
 

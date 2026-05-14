@@ -1,7 +1,6 @@
 import asyncio
 import os
 import secrets
-from datetime import datetime
 from urllib.parse import urlparse
 
 import aiohttp
@@ -76,29 +75,15 @@ def ok(data=None):
     return {"ok": True, "data": data}
 
 
-def scheduler_due(settings, state, prefix):
-    if not settings.get(f"{prefix}_enabled"):
-        return False
-    mode = settings.get(f"{prefix}_schedule_mode") or "interval"
-    last = (state.get("scheduler") or {}).get(prefix) or {}
-    now_ts = int(datetime.now().timestamp())
-    if mode == "daily":
-        target = str(settings.get(f"{prefix}_daily_time") or "09:00")[:5]
-        today = datetime.now().strftime("%Y-%m-%d")
-        return last.get("last_date") != today and datetime.now().strftime("%H:%M") >= target
-    hours = float(settings.get(f"{prefix}_interval_hours") or 6)
-    return not last.get("last_run") or now_ts - int(last.get("last_run") or 0) >= max(1, hours) * 3600
-
-
 async def auto_search_loop():
     while True:
         try:
             settings = await app_core.get_settings()
             state = await app_core.get_resource_state()
-            if scheduler_due(settings, state, "code_search"):
-                await app_core.refresh_code_resources()
-                await app_core.scheduler_mark_run("code_search")
-            if scheduler_due(settings, state, "actress_search"):
+            # The code-search/download scheduler is handled by the Discord bot so
+            # the settings page controls the same job as /check and the old 02:00
+            # bot task. The web loop keeps actress-work refresh scheduling only.
+            if app_core.scheduler_due(settings, state, "actress_search"):
                 await app_core.refresh_actress_works()
                 await app_core.scheduler_mark_run("actress_search")
             await asyncio.sleep(60)
