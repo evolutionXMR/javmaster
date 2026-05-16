@@ -41,6 +41,7 @@ DEFAULT_SETTINGS = {
     "actress_search_interval_hours": 12,
     "actress_search_daily_time": "09:30",
     "preview_images": True,
+    "auto_remove_code_after_push": False,
     # Gopeed connection overrides. Empty token means use config.py fallback.
     "gopeed_url": GOPEED_URL,
     "gopeed_username": "",
@@ -144,7 +145,7 @@ async def save_settings(payload):
         raw = {}
     current = await get_settings()
     allowed = {
-        "language", "discord_enabled", "auto_code_search", "auto_code_search_interval_min", "preview_images",
+        "language", "discord_enabled", "auto_code_search", "auto_code_search_interval_min", "preview_images", "auto_remove_code_after_push",
         "code_search_enabled", "code_search_schedule_mode", "code_search_interval_hours", "code_search_daily_time",
         "actress_search_enabled", "actress_search_schedule_mode", "actress_search_interval_hours", "actress_search_daily_time",
         "gopeed_url", "gopeed_username", "gopeed_download_path",
@@ -324,7 +325,8 @@ async def list_tasks(status="running"):
 
 
 async def delete_task(task_id, force=True):
-    return await gopeed_api(f"tasks/{task_id}?force={str(force).lower()}", method="DELETE")
+    # Gopeed's native force=true deletes the task and its downloaded files.
+    return await gopeed_api(f"tasks/{quote(str(task_id), safe='')}?force={str(force).lower()}", method="DELETE")
 
 
 async def task_display_rows(status="running"):
@@ -425,12 +427,86 @@ async def search_sukebei(code, limit=50, min_gb=None, max_gb=None, keyword=""):
     return filter_resources(items[: int(limit or 50)], min_gb, max_gb, keyword)
 
 
-async def push_resource_to_gopeed(link):
+def task_matches_code(task, code):
+    code = str(code or "").upper().strip()
+    if not code:
+        return False
+    compact = re.sub(r"[^A-Z0-9]", "", code)
+    haystacks = []
+
+    def collect(obj):
+        if isinstance(obj, dict):
+            for key in ("name", "title", "url", "uri", "link"):
+                val = obj.get(key)
+                if isinstance(val, str):
+                    haystacks.append(val)
+            for key in ("req", "meta", "res", "files"):
+                collect(obj.get(key))
+        elif isinstance(obj, list):
+            for item in obj:
+                collect(item)
+
+    collect(task)
+    for value in haystacks:
+        upper = value.upper()
+        if code in upper or (compact and compact in re.sub(r"[^A-Z0-9]", "", upper)):
+            return True
+    return False
+
+
+async def find_gopeed_task_by_code(code):
+    seen = set()
+    tasks = []
+    for status in ("", "ready", "running", "wait", "pause", "done", "error"):
+        endpoint = "tasks" if not status else f"tasks?status={status}"
+        res = await gopeed_api(endpoint)
+        data = res.get("data", []) if isinstance(res, dict) else []
+        if not isinstance(data, list):
+            continue
+        for task in data:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id")
+            key = task_id or id(task)
+            if key in seen:
+                continue
+            seen.add(key)
+            tasks.append(task)
+    for task in tasks:
+        if task_matches_code(task, code):
+            return task
+    return None
+
+
+async def wait_for_gopeed_task(code, timeout=30, interval=2):
+    deadline = time.time() + max(1, float(timeout or 30))
+    while True:
+        task = await find_gopeed_task_by_code(code)
+        if task:
+            return task
+        if time.time() >= deadline:
+            return None
+        await asyncio.sleep(interval)
+
+
+async def push_resource_to_gopeed(link, code=None):
     conn = await gopeed_connection_settings(False)
     payload = {"req": {"url": link}}
     if conn.get("download_path"):
         payload["opt"] = {"path": conn["download_path"]}
-    return await gopeed_api("tasks", method="POST", data=payload)
+    pushed = await gopeed_api("tasks", method="POST", data=payload)
+    result = {"pushed": pushed, "task_found": False, "task": None, "removed_code": False}
+    if code:
+        task = await wait_for_gopeed_task(code)
+        result["task_found"] = bool(task)
+        if task:
+            meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
+            result["task"] = {"id": task.get("id"), "name": task.get("name") or meta.get("name")}
+            settings = await get_settings()
+            if settings.get("auto_remove_code_after_push"):
+                removed = await remove_code(code)
+                result["removed_code"] = bool(removed.get("removed"))
+    return result
 
 
 async def get_resource_state():

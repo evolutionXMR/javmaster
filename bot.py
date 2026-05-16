@@ -397,17 +397,33 @@ async def perform_nyaa_check():
                         # Use app_core so scheduled / manual Discord checks share the same
                         # Gopeed URL, token, and download path from the Web settings page.
                         import app_core
-                        res = await app_core.push_resource_to_gopeed(best_match['link'])
-                        if res and res.get('code') == 0:
-                            bot_tasks[res.get('data')] = code 
+                        res = await app_core.push_resource_to_gopeed(best_match['link'], code)
+                        pushed_resp = res.get('pushed') if isinstance(res, dict) else res
+                        pushed_ok = isinstance(pushed_resp, dict) and pushed_resp.get('code') == 0
+                        task_found = bool(res.get('task_found')) if isinstance(res, dict) else False
+                        task = res.get('task') if isinstance(res, dict) and isinstance(res.get('task'), dict) else {}
+                        task_id = task.get('id') or (pushed_resp.get('data') if isinstance(pushed_resp, dict) else None)
+
+                        # app_core.push_resource_to_gopeed() returns a wrapper:
+                        # {"pushed": <Gopeed API response>, "task_found": bool, ...}.
+                        # Older bot code checked res["code"] directly and therefore reported
+                        # successful Gopeed pushes as failures. Treat either a successful POST
+                        # or a verified Gopeed task as success.
+                        if pushed_ok or task_found:
+                            bot_tasks[task_id or code] = code
                             tag_info = []
                             if 'offkab' in best_match['title'].lower(): tag_info.append("offkab")
                             if '[fhd]' in best_match['title'].lower() or '[fhdc]' in best_match['title'].lower(): tag_info.append("FHD")
                             tag_str = f"[{','.join(tag_info)}]" if tag_info else "[普通]"
-                            logs.append(f"✅ `{code}`: {tag_str} 已推送 | 大小:{best_match['size_text']} | 做种:{best_match['seeders']}")
+                            task_suffix = f" | 任务:{task_id}" if task_id else ""
+                            logs.append(f"✅ `{code}`: {tag_str} 已推送 | 大小:{best_match['size_text']} | 做种:{best_match['seeders']}{task_suffix}")
                             successful_codes.append(code)
                             pushed += 1
-                        else: logs.append(f"❌ `{code}`: 推送失败")
+                        else:
+                            err = ""
+                            if isinstance(pushed_resp, dict):
+                                err = pushed_resp.get('error') or pushed_resp.get('msg') or pushed_resp.get('message') or str(pushed_resp.get('code') or '')
+                            logs.append(f"❌ `{code}`: 推送失败" + (f" ({err})" if err else ""))
                     else: logs.append(f"🔍 `{code}`: 无符合 >4GB 的资源")
             except Exception as e: logs.append(f"❌ `{code}`: 检查出错 ({e})")
                 
