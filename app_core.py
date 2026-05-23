@@ -4,7 +4,9 @@ import hmac
 import json
 import os
 import re
+import shutil
 import time
+from pathlib import Path
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -17,6 +19,8 @@ from config import (
     GOPEED_TOKEN, GOPEED_URL, JAVMASTER_RESOURCE_STATE_FILE,
     JAVMASTER_SETTINGS_FILE, WATCHLIST_FILE,
 )
+
+from jav_scraper import scrape_movie as scrape_single_movie
 
 ACTRESS_WATCHLIST_FILE = os.environ.get("ACTRESS_WATCHLIST_FILE", f"{DATA_DIR}/actress_watchlist.json")
 SETTINGS_FILE = JAVMASTER_SETTINGS_FILE
@@ -55,6 +59,8 @@ DEFAULT_SETTINGS = {
     "aria2_url": "http://192.168.8.88:6800/jsonrpc",
     "aria2_secret_set": False,
     "aria2_download_path": "/downloads",
+    "scrape_output_path": "/downloads/JAV_Sorted",
+    "scrape_remove_task_after_success": False,
 }
 WEB_PASSWORD_SALT = "javmaster:v1:"
 DEFAULT_WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
@@ -153,6 +159,8 @@ async def get_settings():
     merged["aria2_url"] = str(merged.get("aria2_url") or "http://192.168.8.88:6800/jsonrpc")
     merged["aria2_download_path"] = str(merged.get("aria2_download_path") or "/downloads")
     merged["aria2_secret_set"] = bool(settings.get("aria2_secret"))
+    merged["scrape_output_path"] = str(merged.get("scrape_output_path") or "/downloads/JAV_Sorted")
+    merged["scrape_remove_task_after_success"] = bool(merged.get("scrape_remove_task_after_success", False))
     # Never return persisted secrets to the browser.
     for secret_key in ("gopeed_token", "qbittorrent_password", "aria2_secret"):
         merged.pop(secret_key, None)
@@ -172,6 +180,7 @@ async def save_settings(payload):
         "gopeed_url", "gopeed_username", "gopeed_download_path",
         "qbittorrent_url", "qbittorrent_username", "qbittorrent_download_path",
         "aria2_url", "aria2_download_path",
+        "scrape_output_path", "scrape_remove_task_after_success",
     }
     for key in allowed:
         if key in payload:
@@ -404,7 +413,7 @@ async def qbittorrent_api(endpoint, method="GET", data=None, overrides=None):
     try:
         url = f"{conn['url']}/api/v2/{endpoint.lstrip('/')}"
         if method == "GET":
-            async with session.get(url, timeout=15) as resp:
+            async with session.get(url, params=data or None, timeout=15) as resp:
                 text = await resp.text()
                 if resp.status != 200:
                     return {"error": f"HTTP {resp.status}: {text[:200]}"}
@@ -615,6 +624,262 @@ async def task_display_rows(status="running"):
             total = int(t.get("totalLength") or 0); downloaded = int(t.get("completedLength") or 0); pct = round(downloaded / total * 100, 1) if total else 0; name = aria2_task_name(t)
             rows.append({"id": t.get("gid"), "name": name, "short_name": name[:120], "status": t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("downloadSpeed", 0)) + "/s", "upload_speed_text": format_size(t.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("connections", 0) or 0, "total_peers": t.get("numSeeders", 0) or 0})
     return rows
+
+
+MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.rmvb', '.wmv', '.mov', '.flv', '.ts', '.webm', '.iso'}
+MIN_SCRAPE_VIDEO_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def _is_under(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _container_to_scraper_path(path):
+    path = str(path or '').replace('\\', '/').strip()
+    if path.startswith('/video/') or path == '/video':
+        path = '/downloads' + path[len('/video'):]
+    if path.startswith('/app/Downloads/video/') or path == '/app/Downloads/video':
+        path = '/downloads' + path[len('/app/Downloads/video'):]
+    if path.startswith('/downloads/') or path == '/downloads':
+        return '/data' + path[len('/downloads'):]
+    if path.startswith('/data/') or path == '/data':
+        return path
+    return path
+
+
+def _download_path_exists(path):
+    try:
+        return Path(path).exists()
+    except Exception:
+        return False
+
+
+def _resolve_existing_download_source(path):
+    """Normalize downloader paths to JavMaster /downloads without crossing output boundaries.
+
+    Source must be the real completed task folder/file reported by the downloader,
+    e.g. /video/SNOS-239 -> /downloads/SNOS-239. Output/holding folders such as
+    toBeSorted and JAV_Sorted are never searched as source fallbacks.
+    """
+    normalized = _safe_download_path(path)
+    if not _download_path_exists(normalized):
+        raise ValueError(f'下载任务源文件夹不存在，已拒绝越界查找: {normalized}')
+    return normalized
+
+
+def _task_folder_for_source(source_path):
+    """Return exact task folder under /downloads; never cross output boundaries."""
+    source = Path(_safe_download_path(source_path)).resolve()
+    downloads = Path('/downloads').resolve()
+    try:
+        rel = source.relative_to(downloads)
+    except Exception:
+        raise ValueError(f'路径不在下载目录内: {source_path}')
+    if not rel.parts:
+        raise ValueError('拒绝使用下载根目录作为任务目录')
+    blocked_first = {'JAV_Sorted', 'MDC_Failed', 'toBeSorted', 'Chinese_Sorted'}
+    if rel.parts[0] in blocked_first or any(str(part).endswith('.part') for part in rel.parts):
+        raise ValueError(f'拒绝使用输出/未完成目录作为刮削源: {source_path}')
+    return source if source.is_dir() else (downloads / rel.parts[0])
+
+
+def _large_video_files_in_folder(folder):
+    root = Path(folder).resolve()
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f'下载任务源文件夹不存在: {root}')
+    files = []
+    for item in root.rglob('*'):
+        try:
+            if not item.is_file():
+                continue
+            if item.suffix.lower() not in MEDIA_EXTENSIONS:
+                continue
+            if item.name.endswith('.part') or any(part in {'JAV_Sorted', 'MDC_Failed', 'toBeSorted', 'Chinese_Sorted'} for part in item.parts):
+                continue
+            size = item.stat().st_size
+            if size > MIN_SCRAPE_VIDEO_BYTES:
+                files.append((size, item))
+        except Exception:
+            continue
+    files.sort(key=lambda x: x[0], reverse=True)
+    return [{'path': str(path), 'size': size} for size, path in files]
+
+
+def _cleanup_small_files_and_empty_dirs(task_folder, keep_min_bytes=MIN_SCRAPE_VIDEO_BYTES):
+    """After successful scrape, remove only small files, then remove empty dirs.
+
+    Never recursively delete the task folder. If a >=4GB video remains, the folder
+    is intentionally kept for safety.
+    """
+    root = _task_folder_for_source(task_folder)
+    result = {'task_folder': str(root), 'small_files_deleted': [], 'empty_dirs_deleted': [], 'task_folder_deleted': False, 'remaining': []}
+    if not root.exists():
+        result['task_folder_deleted'] = True
+        result['reason'] = 'already_missing'
+        return result
+    for item in sorted(root.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if item.is_file():
+                size = item.stat().st_size
+                if size < keep_min_bytes:
+                    item.unlink()
+                    result['small_files_deleted'].append({'path': str(item), 'size': size})
+            elif item.is_dir():
+                try:
+                    item.rmdir()
+                    result['empty_dirs_deleted'].append(str(item))
+                except OSError:
+                    pass
+        except Exception as exc:
+            result.setdefault('errors', []).append({'path': str(item), 'error': str(exc)})
+    try:
+        root.rmdir()
+        result['task_folder_deleted'] = True
+    except OSError:
+        try:
+            result['remaining'] = [str(x) for x in root.iterdir()]
+        except Exception:
+            result['remaining'] = ['<unable to list>']
+    return result
+
+
+def _extract_code_from_path(path):
+    m = CODE_RE.search(str(path or '').upper())
+    return m.group(0) if m else ''
+
+
+def _scrape_output_contains_code(output_path, code):
+    if not code:
+        return True
+    root = Path(output_path).resolve()
+    if not root.exists():
+        return False
+    code_upper = code.upper()
+    try:
+        for child in root.rglob('*'):
+            if code_upper in child.name.upper():
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _safe_download_path(path, *, allow_sorted=False):
+    path = str(path or '').replace('\\', '/').strip()
+    if not path:
+        return ''
+    # qBittorrent reports host/container paths like /video while JavMaster mounts the same root as /downloads.
+    if path.startswith('/video/') or path == '/video':
+        path = '/downloads' + path[len('/video'):]
+    if path.startswith('/app/Downloads/video/') or path == '/app/Downloads/video':
+        path = '/downloads' + path[len('/app/Downloads/video'):]
+    if path.startswith('/data/') or path == '/data':
+        path = '/downloads' + path[len('/data'):]
+    if not (path == '/downloads' or path.startswith('/downloads/')):
+        raise ValueError(f'只允许刮削下载挂载目录内的文件，当前路径: {path}')
+    blocked = ['/.part']
+    if not allow_sorted:
+        blocked += ['/JAV_Sorted/', '/MDC_Failed/', '/toBeSorted/', '/Chinese_Sorted/']
+    normalized = path.rstrip('/') + ('/' if not path.endswith('/') else '')
+    if any(x in normalized for x in blocked):
+        raise ValueError('该路径属于未完成或已整理目录，已拒绝刮削')
+    return path
+
+
+def _join_task_path(base, name):
+    base = str(base or '').replace('\\', '/').rstrip('/')
+    name = str(name or '').replace('\\', '/').lstrip('/')
+    return f"{base}/{name}" if base and name else base or name
+
+
+def _media_candidates_from_gopeed(detail):
+    meta = detail.get('meta') if isinstance(detail, dict) else {}
+    opts = meta.get('opts') if isinstance(meta, dict) else {}
+    res = meta.get('res') if isinstance(meta, dict) else {}
+    base = opts.get('path') or '/downloads'
+    candidates = []
+    files = res.get('files') if isinstance(res, dict) else []
+    selected = opts.get('selectFiles') if isinstance(opts, dict) else None
+    selected_set = {str(x) for x in selected} if isinstance(selected, list) else None
+    if isinstance(files, list):
+        for i, f in enumerate(files):
+            if selected_set is not None and str(i) not in selected_set and str(f.get('index', '')) not in selected_set:
+                continue
+            name = f.get('path') or f.get('name') if isinstance(f, dict) else ''
+            if name and Path(str(name)).suffix.lower() in MEDIA_EXTENSIONS:
+                candidates.append(_join_task_path(base, name))
+    name = detail.get('name') or res.get('name') if isinstance(res, dict) else detail.get('name')
+    if not candidates and name:
+        candidates.append(_join_task_path(base, name))
+    return candidates
+
+
+async def _task_detail_for_scrape(task_id):
+    client = await selected_download_client()
+    task_id = str(task_id or '')
+    if not task_id:
+        raise ValueError('missing task id')
+    if client == 'gopeed':
+        detail = (await gopeed_api(f"tasks/{quote(task_id, safe='')}")).get('data', {})
+        return client, detail
+    if client == 'qbittorrent':
+        rows = await qbittorrent_api('torrents/info', data={'hashes': task_id})
+        if isinstance(rows, list):
+            for row in rows:
+                if str(row.get('hash') or '').lower() == task_id.lower():
+                    return client, row
+    if client == 'aria2':
+        return client, await aria2_rpc('aria2.tellStatus', [task_id, ['gid','status','files','bittorrent','dir']])
+    raise ValueError('找不到任务或不支持当前下载器')
+
+
+async def scrape_completed_task(task_id, output_path=None):
+    settings = await get_settings()
+    output_path = _safe_download_path(output_path or settings.get('scrape_output_path') or '/downloads/JAV_Sorted', allow_sorted=True)
+    client, detail = await _task_detail_for_scrape(task_id)
+    folder_candidates = []
+    if client == 'gopeed':
+        media_candidates = _media_candidates_from_gopeed(detail)
+        folder_candidates = [str(_task_folder_for_source(_resolve_existing_download_source(x))) for x in media_candidates if x]
+    elif client == 'qbittorrent':
+        folder_candidates = [detail.get('root_path') or detail.get('content_path') or _join_task_path(detail.get('save_path'), detail.get('name'))]
+    elif client == 'aria2':
+        folder_candidates = [detail.get('dir')] if isinstance(detail, dict) else []
+    folders = []
+    for candidate in folder_candidates:
+        if not candidate:
+            continue
+        folder = str(_task_folder_for_source(_resolve_existing_download_source(candidate)))
+        if folder not in folders:
+            folders.append(folder)
+    if not folders:
+        raise ValueError('没有从任务里识别到可刮削的任务文件夹')
+    task_folder = folders[0]
+    large_videos = _large_video_files_in_folder(task_folder)
+    if not large_videos:
+        raise ValueError(f'任务文件夹内没有大于 4GB 的视频文件，已拒绝刮削和清理: {task_folder}')
+    source_path = large_videos[0]['path']
+    scraper_result = await scrape_single_movie(source_path, output_path)
+    code = _extract_code_from_path(source_path) or str(scraper_result.get('code') or '')
+    if not _scrape_output_contains_code(output_path, code):
+        raise ValueError(f'刮削器报告成功但没有在输出目录找到包含 {code or "源番号"} 的文件；源文件已保留')
+    cleanup = _cleanup_small_files_and_empty_dirs(task_folder)
+    task_list_removal = None
+    if settings.get('scrape_remove_task_after_success'):
+        task_list_removal = await delete_task(task_id, False)
+    return {
+        'task_folder': task_folder,
+        'source_path': source_path,
+        'large_videos': large_videos,
+        'output_path': output_path,
+        'scraper': scraper_result,
+        'cleanup': cleanup,
+        'task_list_removal': task_list_removal,
+    }
 
 
 async def get_code_watchlist():
