@@ -42,11 +42,19 @@ DEFAULT_SETTINGS = {
     "actress_search_daily_time": "09:30",
     "preview_images": True,
     "auto_remove_code_after_push": False,
-    # Gopeed connection overrides. Empty token means use config.py fallback.
+    # Downloader connection overrides. Empty secrets mean use saved/config fallback.
+    "download_client": "gopeed",  # gopeed | qbittorrent | aria2
     "gopeed_url": GOPEED_URL,
     "gopeed_username": "",
     "gopeed_download_path": DEFAULT_GOPEED_DOWNLOAD_PATH,
     "gopeed_token_set": bool(GOPEED_TOKEN),
+    "qbittorrent_url": "http://192.168.8.88:8080",
+    "qbittorrent_username": "admin",
+    "qbittorrent_download_path": "/downloads",
+    "qbittorrent_password_set": False,
+    "aria2_url": "http://192.168.8.88:6800/jsonrpc",
+    "aria2_secret_set": False,
+    "aria2_download_path": "/downloads",
 }
 WEB_PASSWORD_SALT = "javmaster:v1:"
 DEFAULT_WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
@@ -130,12 +138,24 @@ async def get_settings():
         merged["bot_token_set"] = bool(TOKEN and not str(TOKEN).startswith("PUT_"))
     except Exception:
         merged["bot_token_set"] = False
+    client = str(merged.get("download_client") or "gopeed").lower()
+    if client not in {"gopeed", "qbittorrent", "aria2"}:
+        client = "gopeed"
+    merged["download_client"] = client
     merged["gopeed_url"] = str(merged.get("gopeed_url") or GOPEED_URL)
     merged["gopeed_username"] = str(merged.get("gopeed_username") or "")
     merged["gopeed_download_path"] = str(merged.get("gopeed_download_path") or "/app/Downloads/video")
     merged["gopeed_token_set"] = bool(settings.get("gopeed_token") or GOPEED_TOKEN)
+    merged["qbittorrent_url"] = str(merged.get("qbittorrent_url") or "http://192.168.8.88:8080")
+    merged["qbittorrent_username"] = str(merged.get("qbittorrent_username") or "")
+    merged["qbittorrent_download_path"] = str(merged.get("qbittorrent_download_path") or "/downloads")
+    merged["qbittorrent_password_set"] = bool(settings.get("qbittorrent_password"))
+    merged["aria2_url"] = str(merged.get("aria2_url") or "http://192.168.8.88:6800/jsonrpc")
+    merged["aria2_download_path"] = str(merged.get("aria2_download_path") or "/downloads")
+    merged["aria2_secret_set"] = bool(settings.get("aria2_secret"))
     # Never return persisted secrets to the browser.
-    merged.pop("gopeed_token", None)
+    for secret_key in ("gopeed_token", "qbittorrent_password", "aria2_secret"):
+        merged.pop(secret_key, None)
     return merged
 
 
@@ -148,7 +168,10 @@ async def save_settings(payload):
         "language", "discord_enabled", "auto_code_search", "auto_code_search_interval_min", "preview_images", "auto_remove_code_after_push",
         "code_search_enabled", "code_search_schedule_mode", "code_search_interval_hours", "code_search_daily_time",
         "actress_search_enabled", "actress_search_schedule_mode", "actress_search_interval_hours", "actress_search_daily_time",
+        "download_client",
         "gopeed_url", "gopeed_username", "gopeed_download_path",
+        "qbittorrent_url", "qbittorrent_username", "qbittorrent_download_path",
+        "aria2_url", "aria2_download_path",
     }
     for key in allowed:
         if key in payload:
@@ -158,6 +181,14 @@ async def save_settings(payload):
         raw["gopeed_token"] = str(payload["gopeed_token"]).strip()
         raw["gopeed_token_set"] = True
         current["gopeed_token_set"] = True
+    if "qbittorrent_password" in payload and str(payload["qbittorrent_password"]).strip():
+        raw["qbittorrent_password"] = str(payload["qbittorrent_password"]).strip()
+        raw["qbittorrent_password_set"] = True
+        current["qbittorrent_password_set"] = True
+    if "aria2_secret" in payload and str(payload["aria2_secret"]).strip():
+        raw["aria2_secret"] = str(payload["aria2_secret"]).strip()
+        raw["aria2_secret_set"] = True
+        current["aria2_secret_set"] = True
     if "bot_token" in payload and str(payload["bot_token"]).strip():
         await update_config_token(str(payload["bot_token"]).strip())
         raw["bot_token_set"] = True
@@ -309,53 +340,280 @@ def format_size(n):
     return f"{n:.2f} PB"
 
 
+async def selected_download_client(override=None):
+    if override is not None:
+        client = str(override or "").lower()
+        if client in {"gopeed", "qbittorrent", "aria2"}:
+            return client
+    settings = await get_settings()
+    client = str(settings.get("download_client") or "gopeed").lower()
+    return client if client in {"gopeed", "qbittorrent", "aria2"} else "gopeed"
+
+
+def normalize_base_url(url, default=""):
+    return str(url or default).strip().rstrip("/")
+
+
+async def qbittorrent_connection_settings(include_secret=False, overrides=None):
+    raw = await load_json(SETTINGS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    overrides = overrides or {}
+    data = {
+        "url": normalize_base_url(overrides.get("qbittorrent_url") or raw.get("qbittorrent_url") or "http://192.168.8.88:8080"),
+        "username": str(overrides.get("qbittorrent_username") if overrides.get("qbittorrent_username") is not None else raw.get("qbittorrent_username") or "").strip(),
+        "download_path": str(overrides.get("qbittorrent_download_path") if overrides.get("qbittorrent_download_path") is not None else raw.get("qbittorrent_download_path") or "/downloads").strip(),
+        "password_set": bool(overrides.get("qbittorrent_password") or raw.get("qbittorrent_password")),
+    }
+    if include_secret:
+        data["password"] = str(overrides.get("qbittorrent_password") or raw.get("qbittorrent_password") or "")
+    return data
+
+
+async def aria2_connection_settings(include_secret=False, overrides=None):
+    raw = await load_json(SETTINGS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    overrides = overrides or {}
+    data = {
+        "url": str(overrides.get("aria2_url") or raw.get("aria2_url") or "http://192.168.8.88:6800/jsonrpc").strip(),
+        "download_path": str(overrides.get("aria2_download_path") if overrides.get("aria2_download_path") is not None else raw.get("aria2_download_path") or "/downloads").strip(),
+        "secret_set": bool(overrides.get("aria2_secret") or raw.get("aria2_secret")),
+    }
+    if include_secret:
+        data["secret"] = str(overrides.get("aria2_secret") or raw.get("aria2_secret") or "")
+    return data
+
+
+async def qbittorrent_session(conn):
+    session = aiohttp.ClientSession()
+    if conn.get("username") or conn.get("password"):
+        url = f"{conn['url']}/api/v2/auth/login"
+        data = {"username": conn.get("username") or "", "password": conn.get("password") or ""}
+        resp = await session.post(url, data=data, timeout=10)
+        text = await resp.text()
+        if resp.status != 200 or text.strip().lower() not in {"ok", ""}:
+            await session.close()
+            raise RuntimeError(f"qBittorrent login failed: HTTP {resp.status} {text[:120]}")
+    return session
+
+
+async def qbittorrent_api(endpoint, method="GET", data=None, overrides=None):
+    conn = await qbittorrent_connection_settings(include_secret=True, overrides=overrides or {})
+    session = await qbittorrent_session(conn)
+    try:
+        url = f"{conn['url']}/api/v2/{endpoint.lstrip('/')}"
+        if method == "GET":
+            async with session.get(url, timeout=15) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    return {"error": f"HTTP {resp.status}: {text[:200]}"}
+                try:
+                    return json.loads(text) if text else {"ok": True}
+                except Exception:
+                    return {"text": text}
+        if method == "POST":
+            async with session.post(url, data=data or {}, timeout=20) as resp:
+                text = await resp.text()
+                if resp.status not in (200, 204):
+                    return {"error": f"HTTP {resp.status}: {text[:200]}"}
+                return {"ok": True, "text": text}
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        await session.close()
+    return {"error": f"Unsupported method {method}"}
+
+
+async def aria2_rpc(method, params=None, overrides=None):
+    conn = await aria2_connection_settings(include_secret=True, overrides=overrides or {})
+    params = list(params or [])
+    if conn.get("secret"):
+        params.insert(0, f"token:{conn['secret']}")
+    payload = {"jsonrpc": "2.0", "id": "javmaster", "method": method, "params": params}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(conn["url"], json=payload, timeout=15) as resp:
+                text = await resp.text()
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    data = {"raw": text[:200]}
+                if resp.status != 200 or data.get("error"):
+                    return {"error": data.get("error") or f"HTTP {resp.status}: {text[:200]}"}
+                return data.get("result")
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+async def test_qbittorrent_connection(overrides=None):
+    conn = await qbittorrent_connection_settings(include_secret=True, overrides=overrides or {})
+    version = await qbittorrent_api("app/version", overrides=overrides or {})
+    ok = not (isinstance(version, dict) and version.get("error"))
+    version_text = version.get("text") if isinstance(version, dict) else version
+    return {"ok": ok, "url": conn["url"], "username": conn.get("username") or "", "password_set": bool(conn.get("password")), "configured_download_path": conn.get("download_path") or "", "version": version_text if ok else None, "message": "连接成功" if ok else version.get("error", "unknown")}
+
+
+async def test_aria2_connection(overrides=None):
+    conn = await aria2_connection_settings(include_secret=True, overrides=overrides or {})
+    version = await aria2_rpc("aria2.getVersion", overrides=overrides or {})
+    ok = not (isinstance(version, dict) and version.get("error"))
+    return {"ok": ok, "url": conn["url"], "secret_set": bool(conn.get("secret")), "configured_download_path": conn.get("download_path") or "", "version": version if ok else None, "message": "连接成功" if ok else version.get("error", "unknown")}
+
+
 async def get_config_summary():
-    res = await gopeed_api("config")
-    data = res.get("data") if isinstance(res, dict) else None
-    if not isinstance(data, dict):
-        return {"ok": False, "error": (res or {}).get("error") or (res or {}).get("msg") or "unknown"}
-    bt = (data.get("protocolConfig") or {}).get("bt") or {}
-    return {"ok": True, "downloadDir": data.get("downloadDir"), "maxRunning": data.get("maxRunning"), "bt": {"listenPort": bt.get("listenPort"), "seedKeep": bt.get("seedKeep"), "seedRatio": bt.get("seedRatio"), "seedTime": bt.get("seedTime")}}
+    client = await selected_download_client()
+    if client == "gopeed":
+        res = await gopeed_api("config")
+        data = res.get("data") if isinstance(res, dict) else None
+        if not isinstance(data, dict):
+            return {"ok": False, "client": client, "error": (res or {}).get("error") or (res or {}).get("msg") or "unknown"}
+        bt = (data.get("protocolConfig") or {}).get("bt") or {}
+        return {"ok": True, "client": client, "downloadDir": data.get("downloadDir"), "maxRunning": data.get("maxRunning"), "bt": {"listenPort": bt.get("listenPort"), "seedKeep": bt.get("seedKeep"), "seedRatio": bt.get("seedRatio"), "seedTime": bt.get("seedTime")}}
+    if client == "qbittorrent":
+        return await test_qbittorrent_connection()
+    if client == "aria2":
+        return await test_aria2_connection()
+    return {"ok": False, "client": client, "error": "unsupported client"}
 
 
 async def list_tasks(status="running"):
-    res = await gopeed_api(f"tasks?status={status}")
-    data = res.get("data", []) if isinstance(res, dict) else []
-    return data if isinstance(data, list) else []
+    client = await selected_download_client()
+    if client == "gopeed":
+        statuses = ["done"] if status == "done" else ["running", "pause", "wait", "ready"]
+        out = []
+        seen = set()
+        for st in statuses:
+            res = await gopeed_api(f"tasks?status={st}")
+            data = res.get("data", []) if isinstance(res, dict) else []
+            if not isinstance(data, list):
+                continue
+            for task in data:
+                key = task.get("id") or id(task)
+                if key not in seen:
+                    seen.add(key); out.append(task)
+        return out
+    if client == "qbittorrent":
+        data = await qbittorrent_api("torrents/info")
+        if not isinstance(data, list):
+            return []
+        if status == "done":
+            return [t for t in data if float(t.get("progress") or 0) >= 1]
+        return [t for t in data if float(t.get("progress") or 0) < 1]
+    if client == "aria2":
+        if status == "running":
+            active = await aria2_rpc("aria2.tellActive", [["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "connections", "numSeeders", "files", "bittorrent"]])
+            waiting = await aria2_rpc("aria2.tellWaiting", [0, 100, ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "connections", "numSeeders", "files", "bittorrent"]])
+            rows = []
+            if isinstance(active, list): rows += active
+            if isinstance(waiting, list): rows += [x for x in waiting if x.get("status") in {"active", "waiting", "paused"}]
+            return rows
+        stopped = await aria2_rpc("aria2.tellStopped", [0, 100, ["gid", "status", "totalLength", "completedLength", "downloadSpeed", "uploadSpeed", "connections", "numSeeders", "files", "bittorrent"]])
+        return [x for x in stopped if x.get("status") == "complete"] if isinstance(stopped, list) else []
+    return []
 
 
 async def delete_task(task_id, force=True):
-    # Gopeed's native force=true deletes the task and its downloaded files.
-    return await gopeed_api(f"tasks/{quote(str(task_id), safe='')}?force={str(force).lower()}", method="DELETE")
+    client = await selected_download_client()
+    task_id = str(task_id or "")
+    if client == "gopeed":
+        return await gopeed_api(f"tasks/{quote(task_id, safe='')}?force={str(force).lower()}", method="DELETE")
+    if client == "qbittorrent":
+        return await qbittorrent_api("torrents/delete", method="POST", data={"hashes": task_id, "deleteFiles": "true" if force else "false"})
+    if client == "aria2":
+        method = "aria2.removeDownloadResult" if not force else "aria2.forceRemove"
+        return await aria2_rpc(method, [task_id])
+    return {"error": "unsupported client"}
+
+
+async def pause_task(task_id):
+    client = await selected_download_client()
+    task_id = str(task_id or "")
+    if not task_id:
+        return {"error": "missing task id"}
+    if client == "gopeed":
+        res = await gopeed_api(f"tasks/{quote(task_id, safe='')}/pause", method="PUT")
+        if isinstance(res, dict) and res.get("error"):
+            post_res = await gopeed_api(f"tasks/{quote(task_id, safe='')}/pause", method="POST")
+            return post_res if not (isinstance(post_res, dict) and post_res.get("error")) else res
+        return res
+    if client == "qbittorrent":
+        # qBittorrent Web API v5 renamed pause/resume to stop/start; older v4 uses pause/resume.
+        res = await qbittorrent_api("torrents/pause", method="POST", data={"hashes": task_id})
+        if isinstance(res, dict) and res.get("error") and ("404" in str(res.get("error")) or "Not Found" in str(res.get("error"))):
+            return await qbittorrent_api("torrents/stop", method="POST", data={"hashes": task_id})
+        return res
+    if client == "aria2":
+        return await aria2_rpc("aria2.forcePause", [task_id])
+    return {"error": "unsupported client"}
+
+
+async def resume_task(task_id):
+    client = await selected_download_client()
+    task_id = str(task_id or "")
+    if not task_id:
+        return {"error": "missing task id"}
+    if client == "gopeed":
+        res = await gopeed_api(f"tasks/{quote(task_id, safe='')}/continue", method="PUT")
+        if isinstance(res, dict) and res.get("error"):
+            post_res = await gopeed_api(f"tasks/{quote(task_id, safe='')}/continue", method="POST")
+            return post_res if not (isinstance(post_res, dict) and post_res.get("error")) else res
+        return res
+    if client == "qbittorrent":
+        # qBittorrent Web API v5 renamed pause/resume to stop/start; older v4 uses pause/resume.
+        res = await qbittorrent_api("torrents/resume", method="POST", data={"hashes": task_id})
+        if isinstance(res, dict) and res.get("error") and ("404" in str(res.get("error")) or "Not Found" in str(res.get("error"))):
+            return await qbittorrent_api("torrents/start", method="POST", data={"hashes": task_id})
+        return res
+    if client == "aria2":
+        return await aria2_rpc("aria2.unpause", [task_id])
+    return {"error": "unsupported client"}
+
+
+async def clear_done_tasks():
+    tasks = await list_tasks("done")
+    results = []
+    for t in tasks:
+        task_id = t.get("id") or t.get("hash") or t.get("gid")
+        if not task_id:
+            continue
+        results.append({"id": task_id, "result": await delete_task(task_id, False)})
+    return {"cleared": len(results), "results": results}
+
+
+def aria2_task_name(t):
+    bt = t.get("bittorrent") if isinstance(t.get("bittorrent"), dict) else {}
+    info = bt.get("info") if isinstance(bt.get("info"), dict) else {}
+    if info.get("name"):
+        return info.get("name")
+    files = t.get("files") if isinstance(t.get("files"), list) else []
+    if files:
+        return os.path.basename(files[0].get("path") or "") or files[0].get("path") or "未命名任务"
+    return t.get("gid") or "未命名任务"
 
 
 async def task_display_rows(status="running"):
+    client = await selected_download_client()
     tasks = await list_tasks(status)
     rows = []
     for t in tasks:
-        task_id = t.get("id")
-        detail = (await gopeed_api(f"tasks/{task_id}")).get("data", {}) if task_id else {}
-        stats = (await gopeed_api(f"tasks/{task_id}/stats")).get("data", {}) if task_id else {}
-        progress = detail.get("progress") or t.get("progress") or {}
-        meta = detail.get("meta") or t.get("meta") or {}
-        total = ((meta.get("res") or {}).get("size") or 0)
-        downloaded = progress.get("downloaded", 0) or 0
-        pct = round(downloaded / total * 100, 1) if total else 0
-        name = t.get("name") or detail.get("name") or "未命名任务"
-        rows.append({
-            "id": task_id,
-            "name": name,
-            "short_name": name[:120],
-            "status": detail.get("status") or t.get("status") or status,
-            "progress": pct,
-            "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})",
-            "download_speed_text": format_size(progress.get("speed", 0)) + "/s",
-            "upload_speed_text": format_size(progress.get("uploadSpeed", 0)) + "/s",
-            "downloaded_text": format_size(downloaded),
-            "total_size_text": format_size(total),
-            "active_peers": stats.get("activePeers", 0) or 0,
-            "total_peers": stats.get("totalPeers", 0) or 0,
-        })
+        if client == "gopeed":
+            task_id = t.get("id")
+            detail = (await gopeed_api(f"tasks/{task_id}")).get("data", {}) if task_id else {}
+            stats = (await gopeed_api(f"tasks/{task_id}/stats")).get("data", {}) if task_id else {}
+            progress = detail.get("progress") or t.get("progress") or {}
+            meta = detail.get("meta") or t.get("meta") or {}
+            total = ((meta.get("res") or {}).get("size") or 0)
+            downloaded = progress.get("downloaded", 0) or 0
+            name = t.get("name") or detail.get("name") or "未命名任务"
+            pct = round(downloaded / total * 100, 1) if total else 0
+            rows.append({"id": task_id, "name": name, "short_name": name[:120], "status": detail.get("status") or t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(progress.get("speed", 0)) + "/s", "upload_speed_text": format_size(progress.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": stats.get("activePeers", 0) or 0, "total_peers": stats.get("totalPeers", 0) or 0})
+        elif client == "qbittorrent":
+            total = int(t.get("size") or 0); downloaded = int(float(t.get("progress") or 0) * total); pct = round(float(t.get("progress") or 0) * 100, 1)
+            rows.append({"id": t.get("hash"), "name": t.get("name") or "未命名任务", "short_name": (t.get("name") or "未命名任务")[:120], "status": t.get("state") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("dlspeed", 0)) + "/s", "upload_speed_text": format_size(t.get("upspeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("num_leechs", 0) or 0, "total_peers": t.get("num_seeds", 0) or 0})
+        elif client == "aria2":
+            total = int(t.get("totalLength") or 0); downloaded = int(t.get("completedLength") or 0); pct = round(downloaded / total * 100, 1) if total else 0; name = aria2_task_name(t)
+            rows.append({"id": t.get("gid"), "name": name, "short_name": name[:120], "status": t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("downloadSpeed", 0)) + "/s", "upload_speed_text": format_size(t.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("connections", 0) or 0, "total_peers": t.get("numSeeders", 0) or 0})
     return rows
 
 
@@ -454,23 +712,17 @@ def task_matches_code(task, code):
     return False
 
 
-async def find_gopeed_task_by_code(code):
+async def find_download_task_by_code(code):
     seen = set()
     tasks = []
-    for status in ("", "ready", "running", "wait", "pause", "done", "error"):
-        endpoint = "tasks" if not status else f"tasks?status={status}"
-        res = await gopeed_api(endpoint)
-        data = res.get("data", []) if isinstance(res, dict) else []
-        if not isinstance(data, list):
-            continue
-        for task in data:
+    for status in ("running", "done"):
+        for task in await list_tasks(status):
             if not isinstance(task, dict):
                 continue
-            task_id = task.get("id")
-            key = task_id or id(task)
-            if key in seen:
+            task_id = task.get("id") or task.get("hash") or task.get("gid") or id(task)
+            if task_id in seen:
                 continue
-            seen.add(key)
+            seen.add(task_id)
             tasks.append(task)
     for task in tasks:
         if task_matches_code(task, code):
@@ -478,10 +730,10 @@ async def find_gopeed_task_by_code(code):
     return None
 
 
-async def wait_for_gopeed_task(code, timeout=30, interval=2):
+async def wait_for_download_task(code, timeout=30, interval=2):
     deadline = time.time() + max(1, float(timeout or 30))
     while True:
-        task = await find_gopeed_task_by_code(code)
+        task = await find_download_task_by_code(code)
         if task:
             return task
         if time.time() >= deadline:
@@ -489,24 +741,45 @@ async def wait_for_gopeed_task(code, timeout=30, interval=2):
         await asyncio.sleep(interval)
 
 
-async def push_resource_to_gopeed(link, code=None):
-    conn = await gopeed_connection_settings(False)
-    payload = {"req": {"url": link}}
-    if conn.get("download_path"):
-        payload["opt"] = {"path": conn["download_path"]}
-    pushed = await gopeed_api("tasks", method="POST", data=payload)
-    result = {"pushed": pushed, "task_found": False, "task": None, "removed_code": False}
+async def push_resource_to_downloader(link, code=None, download_client=None):
+    client = await selected_download_client(download_client)
+    result = {"client": client, "pushed": None, "task_found": False, "task": None, "removed_code": False}
+    if client == "gopeed":
+        conn = await gopeed_connection_settings(False)
+        payload = {"req": {"url": link}}
+        if conn.get("download_path"):
+            payload["opt"] = {"path": conn["download_path"]}
+        result["pushed"] = await gopeed_api("tasks", method="POST", data=payload)
+    elif client == "qbittorrent":
+        conn = await qbittorrent_connection_settings(False)
+        data = {"urls": link}
+        if conn.get("download_path"):
+            data["savepath"] = conn["download_path"]
+        result["pushed"] = await qbittorrent_api("torrents/add", method="POST", data=data)
+    elif client == "aria2":
+        conn = await aria2_connection_settings(False)
+        opts = {}
+        if conn.get("download_path"):
+            opts["dir"] = conn["download_path"]
+        result["pushed"] = await aria2_rpc("aria2.addUri", [[link], opts])
+    else:
+        result["pushed"] = {"error": "unsupported client"}
     if code:
-        task = await wait_for_gopeed_task(code)
+        task = await wait_for_download_task(code)
         result["task_found"] = bool(task)
         if task:
             meta = task.get("meta") if isinstance(task.get("meta"), dict) else {}
-            result["task"] = {"id": task.get("id"), "name": task.get("name") or meta.get("name")}
+            result["task"] = {"id": task.get("id") or task.get("hash") or task.get("gid"), "name": task.get("name") or meta.get("name") or aria2_task_name(task)}
             settings = await get_settings()
             if settings.get("auto_remove_code_after_push"):
                 removed = await remove_code(code)
                 result["removed_code"] = bool(removed.get("removed"))
     return result
+
+
+# Backward-compatible name used by existing bot/web code.
+async def push_resource_to_gopeed(link, code=None):
+    return await push_resource_to_downloader(link, code)
 
 
 async def get_resource_state():
@@ -597,34 +870,56 @@ async def save_actress_watchlist(items):
     await save_json(ACTRESS_WATCHLIST_FILE, items)
 
 
-async def refresh_actress_works():
-    """Refresh all watched actresses and update latest_seen when new works appear."""
+async def refresh_actress_works(delay_seconds=3):
+    """Refresh watched actresses sequentially, with a small delay between sites requests.
+
+    The delay reduces the chance of triggering upstream anti-bot throttling.
+    Each item is saved after it is checked so the UI can show per-actress
+    refresh/highlight state even while a long refresh is in progress.
+    """
     from bot import fetch_actress_works
     items = await get_actress_watchlist()
     updates = []
-    for item in items:
+    state = await get_resource_state()
+    total = len(items)
+    try:
+        delay_seconds = max(0, float(delay_seconds or 0))
+    except Exception:
+        delay_seconds = 3
+    for idx, item in enumerate(items):
+        now = int(time.time())
+        item["refresh_order"] = idx + 1
+        item["last_refresh_started"] = now
         try:
             canonical, works, matched_query, warning = await fetch_actress_works(item.get("name", ""), limit=5)
             if warning or not works:
+                item["last_checked"] = int(time.time())
                 item["last_error"] = warning or "No works"
-                continue
-            latest = works[0].get("code")
-            old_latest = item.get("latest_seen")
-            item["last_checked"] = int(time.time())
-            item.pop("last_error", None)
-            if latest and latest != old_latest:
-                item["latest_seen"] = latest
-                if old_latest:
-                    updates.append({"name": item.get("name"), "old": old_latest, "latest": latest, "work": works[0], "ts": int(time.time())})
+            else:
+                latest = works[0].get("code")
+                old_latest = item.get("latest_seen")
+                item["last_checked"] = int(time.time())
+                item.pop("last_error", None)
+                if latest and latest != old_latest:
+                    item["latest_seen"] = latest
+                    if old_latest:
+                        item["has_new_work"] = True
+                        item["new_work_ts"] = int(time.time())
+                        item["new_work_title"] = works[0].get("title") or ""
+                        item["new_work_date"] = works[0].get("date") or ""
+                        updates.append({"name": item.get("name"), "old": old_latest, "latest": latest, "work": works[0], "ts": int(time.time())})
         except Exception as exc:
+            item["last_checked"] = int(time.time())
             item["last_error"] = str(exc)
-    await save_actress_watchlist(items)
-    state = await get_resource_state()
-    if updates:
-        state["actress_updates"] = (updates + state.get("actress_updates", []))[:50]
-    state["last_actress_auto_run"] = int(time.time())
-    await save_json(RESOURCE_STATE_FILE, state)
-    return {"checked": len(items), "updates": updates, "watchlist": items}
+        # Persist after every actress so the page can reflect refresh order and highlights.
+        await save_actress_watchlist(items)
+        if updates:
+            state["actress_updates"] = (updates + state.get("actress_updates", []))[:50]
+        state["last_actress_auto_run"] = int(time.time())
+        await save_json(RESOURCE_STATE_FILE, state)
+        if idx < total - 1 and delay_seconds:
+            await asyncio.sleep(delay_seconds)
+    return {"checked": len(items), "updates": updates, "watchlist": items, "delay_seconds": delay_seconds}
 
 
 async def scheduler_mark_run(prefix):
