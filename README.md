@@ -24,6 +24,19 @@ JavMaster 是一个自托管的 FastAPI + Discord.py JAV 管理面板，用来�
 - 下载后清理工具：保护 `.part` 未完成文件，并排除 `JAV_Sorted`、`toBeSorted`、`MDC_Failed`、`Chinese_Sorted` 等已整理 / 中间目录。
 - Docker Compose 部署，支持 `data` 与 `downloads` 持久化挂载。
 
+
+### 求赞助
+
+这个项目为本人使用AI制作 token消耗巨大 请求路过的大哥大姐行行好。
+
+如果 JavMaster 对你有帮助，欢迎随缘赞助。二维码中的个人头像 / ID 信息已做遮挡处理。
+
+<p>
+  <img src="assets/sponsor/sponsor-wechat.png" alt="微信赞助二维码" width="220">
+  <img src="assets/sponsor/sponsor-alipay.png" alt="支付宝赞助二维码" width="220">
+  <img src="assets/sponsor/sponsor-paypal.png" alt="PayPal tip jar QR code" width="220">
+</p>
+
 ### 最新刮削整理规则
 
 刮削目标目录默认为容器内：
@@ -209,6 +222,19 @@ JavMaster is a self-hosted FastAPI + Discord.py control panel for managing JAV c
 - Optional removal of the completed downloader task record after successful scraping; this does not delete the sorted movie file.
 - Cleanup helper that protects `.part` files and excludes sorted/intermediate folders such as `JAV_Sorted`, `toBeSorted`, `MDC_Failed`, and `Chinese_Sorted`.
 - Docker Compose deployment with persistent `data` and `downloads` volumes.
+
+
+### Support / Sponsorship
+
+This project was built by me with the help of AI, and the token consumption has been enormous. If you happen to pass by and feel generous, any support would be greatly appreciated.
+
+If JavMaster is useful to you, feel free to sponsor the project. Personal avatar / ID details in the QR images have been masked.
+
+<p>
+  <img src="assets/sponsor/sponsor-wechat.png" alt="WeChat sponsor QR code" width="220">
+  <img src="assets/sponsor/sponsor-alipay.png" alt="Alipay sponsor QR code" width="220">
+  <img src="assets/sponsor/sponsor-paypal.png" alt="PayPal tip jar QR code" width="220">
+</p>
 
 ### Current scraping layout
 
