@@ -25,6 +25,34 @@ JavMaster 是一个自托管的 FastAPI + Discord.py JAV 管理面板，用来�
 - Docker Compose 部署，支持 `data` 与 `downloads` 持久化挂载。
 
 
+### 界面预览 / 宣传图
+
+JavMaster 提供暗色系 Web 控制台与 Discord Bot 自动化通知，把“关注 → 搜索 → 推送下载 → 下载管理 → 刮削整理”的流程集中到一个自托管面板里。
+
+<p>
+  <img src="assets/mainpage.png" alt="JavMaster 主页仪表盘" width="860">
+</p>
+
+- **统一仪表盘**：显示当前下载器状态、下载任务数量、番号关注数量、女优关注数量，以及最新资源更新提示。
+- **番号资源监控**：批量维护番号列表，一键搜索 Sukebei 资源，按大小、做种 / 下载人数筛选后直接推送到下载器。
+- **女优 / 演员新作追踪**：维护女优关注列表，查看最新作品、封面、发布日期，并可一键加入番号监控。
+- **下载任务管理**：在 Web 页面查看进度、速度、Peers 和状态，支持暂停、恢复、删除，以及下载完成后的刮削入口。
+- **Discord 自动报告**：Bot 可定时输出番号检查报告，把找到的资源和推送结果直接发到 Discord。
+- **登录保护与自托管部署**：适合部署在 NAS / 家庭服务器上，通过反向代理或内网访问。
+
+<p>
+  <img src="assets/codemonitorpage.png" alt="番号资源搜索与推送页面" width="48%">
+  <img src="assets/actressMonitorPage.png" alt="女优新作监控页面" width="48%">
+</p>
+<p>
+  <img src="assets/downloadpage.png" alt="下载任务管理页面" width="48%">
+  <img src="assets/discord.png" alt="Discord 自动番号检查报告" width="48%">
+</p>
+<p>
+  <img src="assets/login.png" alt="JavMaster 登录页面" width="48%">
+</p>
+
+
 ### 求赞助
 
 这个项目为本人使用AI制作 token消耗巨大 请求路过的大哥大姐行行好。
@@ -222,6 +250,34 @@ JavMaster is a self-hosted FastAPI + Discord.py control panel for managing JAV c
 - Optional removal of the completed downloader task record after successful scraping; this does not delete the sorted movie file.
 - Cleanup helper that protects `.part` files and excludes sorted/intermediate folders such as `JAV_Sorted`, `toBeSorted`, `MDC_Failed`, and `Chinese_Sorted`.
 - Docker Compose deployment with persistent `data` and `downloads` volumes.
+
+
+### Screenshots / Promo
+
+JavMaster combines a dark Web control panel with Discord bot automation, bringing the full flow — watchlist, search, push to downloader, task management, and post-download scraping — into one self-hosted dashboard.
+
+<p>
+  <img src="assets/mainpage.png" alt="JavMaster dashboard" width="860">
+</p>
+
+- **Unified dashboard:** see downloader health, running download count, watched codes, watched actresses/actors, and resource update alerts at a glance.
+- **Code resource monitoring:** maintain a code watchlist, search Sukebei results, filter by size and seed/leech counts, then push resources directly to the selected downloader.
+- **Actress / actor release tracking:** follow performers, view new releases with covers and dates, and add works to the code watchlist in one click.
+- **Download task management:** track progress, speed, peers, and status from the Web UI, with pause/resume/delete controls and a scraping entry point for completed tasks.
+- **Discord auto reports:** the bot can publish scheduled code-check reports and resource-push results directly to Discord.
+- **Login-protected self-hosting:** designed for NAS / home-server deployment behind LAN access or a reverse proxy.
+
+<p>
+  <img src="assets/codemonitorpage.png" alt="Code resource search and push page" width="48%">
+  <img src="assets/actressMonitorPage.png" alt="Actress release monitoring page" width="48%">
+</p>
+<p>
+  <img src="assets/downloadpage.png" alt="Download task management page" width="48%">
+  <img src="assets/discord.png" alt="Discord automatic code-check report" width="48%">
+</p>
+<p>
+  <img src="assets/login.png" alt="JavMaster login page" width="48%">
+</p>
 
 
 ### Support / Sponsorship
