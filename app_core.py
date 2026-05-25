@@ -401,7 +401,10 @@ async def qbittorrent_session(conn):
         data = {"username": conn.get("username") or "", "password": conn.get("password") or ""}
         resp = await session.post(url, data=data, timeout=10)
         text = await resp.text()
-        if resp.status != 200 or text.strip().lower() not in {"ok", ""}:
+        # qBittorrent Web API commonly returns 200 "Ok.", 200 "Ok", or 204 No Content
+        # for successful login depending on version/config. Treat all as success.
+        ok_text = text.strip().lower().rstrip(".")
+        if resp.status not in (200, 204) or ok_text not in {"ok", ""}:
             await session.close()
             raise RuntimeError(f"qBittorrent login failed: HTTP {resp.status} {text[:120]}")
     return session
