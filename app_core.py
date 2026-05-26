@@ -61,6 +61,9 @@ DEFAULT_SETTINGS = {
     "aria2_download_path": "/downloads",
     "scrape_output_path": "/downloads/JAV_Sorted",
     "scrape_remove_task_after_success": False,
+    "jellyfin_enabled": False,
+    "jellyfin_url": "",
+    "jellyfin_api_key_set": False,
 }
 WEB_PASSWORD_SALT = "javmaster:v1:"
 DEFAULT_WEB_USERNAME = os.environ.get("WEB_USERNAME", "admin")
@@ -161,8 +164,11 @@ async def get_settings():
     merged["aria2_secret_set"] = bool(settings.get("aria2_secret"))
     merged["scrape_output_path"] = str(merged.get("scrape_output_path") or "/downloads/JAV_Sorted")
     merged["scrape_remove_task_after_success"] = bool(merged.get("scrape_remove_task_after_success", False))
+    merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled", False))
+    merged["jellyfin_url"] = str(merged.get("jellyfin_url") or "").rstrip("/")
+    merged["jellyfin_api_key_set"] = bool(settings.get("jellyfin_api_key"))
     # Never return persisted secrets to the browser.
-    for secret_key in ("gopeed_token", "qbittorrent_password", "aria2_secret"):
+    for secret_key in ("gopeed_token", "qbittorrent_password", "aria2_secret", "jellyfin_api_key"):
         merged.pop(secret_key, None)
     return merged
 
@@ -181,6 +187,7 @@ async def save_settings(payload):
         "qbittorrent_url", "qbittorrent_username", "qbittorrent_download_path",
         "aria2_url", "aria2_download_path",
         "scrape_output_path", "scrape_remove_task_after_success",
+        "jellyfin_enabled", "jellyfin_url",
     }
     for key in allowed:
         if key in payload:
@@ -198,6 +205,10 @@ async def save_settings(payload):
         raw["aria2_secret"] = str(payload["aria2_secret"]).strip()
         raw["aria2_secret_set"] = True
         current["aria2_secret_set"] = True
+    if "jellyfin_api_key" in payload and str(payload["jellyfin_api_key"]).strip():
+        raw["jellyfin_api_key"] = str(payload["jellyfin_api_key"]).strip()
+        raw["jellyfin_api_key_set"] = True
+        current["jellyfin_api_key_set"] = True
     if "bot_token" in payload and str(payload["bot_token"]).strip():
         await update_config_token(str(payload["bot_token"]).strip())
         raw["bot_token_set"] = True
@@ -327,6 +338,126 @@ async def test_gopeed_connection(overrides=None):
                 }
     except Exception as exc:
         return {"ok": False, "url": conn["url"], "username": conn.get("username") or "", "token_set": bool(conn.get("token")), "configured_download_path": conn.get("download_path") or "", "error": str(exc), "message": str(exc)}
+
+
+def normalize_jellyfin_url(url):
+    return str(url or "").strip().rstrip("/")
+
+
+async def jellyfin_connection_settings(include_secret=False, overrides=None):
+    raw = await load_json(SETTINGS_FILE, {})
+    if not isinstance(raw, dict):
+        raw = {}
+    overrides = overrides or {}
+    url = normalize_jellyfin_url(overrides.get("jellyfin_url") if overrides.get("jellyfin_url") is not None else raw.get("jellyfin_url") or "")
+    api_key = str(overrides.get("jellyfin_api_key") or raw.get("jellyfin_api_key") or "").strip()
+    enabled = bool(overrides.get("jellyfin_enabled") if overrides.get("jellyfin_enabled") is not None else raw.get("jellyfin_enabled", False))
+    data = {"enabled": enabled, "url": url, "api_key_set": bool(api_key)}
+    if include_secret:
+        data["api_key"] = api_key
+    return data
+
+
+def jellyfin_headers(conn):
+    headers = {"Accept": "application/json"}
+    if conn.get("api_key"):
+        headers["X-Emby-Token"] = conn["api_key"]
+    return headers
+
+
+def normalize_library_code_text(value):
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def jellyfin_item_matches_code(item, code):
+    code = str(code or "").upper().strip()
+    if not code:
+        return False
+    compact = normalize_library_code_text(code)
+    fields = [
+        item.get("Name"), item.get("OriginalTitle"), item.get("SortName"),
+        item.get("Path"), item.get("FileName"), item.get("Overview"),
+    ]
+    provider_ids = item.get("ProviderIds")
+    if isinstance(provider_ids, dict):
+        fields.extend(provider_ids.values())
+    for value in fields:
+        text = str(value or "").upper()
+        if code in text or (compact and compact in normalize_library_code_text(text)):
+            return True
+    return False
+
+
+async def test_jellyfin_connection(overrides=None):
+    conn = await jellyfin_connection_settings(include_secret=True, overrides=overrides or {})
+    if not conn.get("url"):
+        return {"ok": False, "url": "", "api_key_set": bool(conn.get("api_key")), "message": "请填写 Jellyfin URL"}
+    if not conn.get("api_key"):
+        return {"ok": False, "url": conn["url"], "api_key_set": False, "message": "请填写 Jellyfin API Key"}
+    url = f"{conn['url']}/System/Info"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=jellyfin_headers(conn), timeout=10) as resp:
+                text = await resp.text()
+                try:
+                    payload = json.loads(text) if text else {}
+                except Exception:
+                    payload = {"raw": text[:200]}
+                ok = resp.status == 200 and isinstance(payload, dict)
+                return {
+                    "ok": ok,
+                    "http_status": resp.status,
+                    "url": conn["url"],
+                    "api_key_set": bool(conn.get("api_key")),
+                    "server_name": payload.get("ServerName") or payload.get("LocalAddress") if isinstance(payload, dict) else None,
+                    "version": payload.get("Version") if isinstance(payload, dict) else None,
+                    "message": "连接成功" if ok else f"HTTP {resp.status}",
+                }
+    except Exception as exc:
+        return {"ok": False, "url": conn["url"], "api_key_set": bool(conn.get("api_key")), "error": str(exc), "message": str(exc)}
+
+
+async def jellyfin_search_code(code):
+    conn = await jellyfin_connection_settings(include_secret=True)
+    if not conn.get("enabled") or not conn.get("url") or not conn.get("api_key"):
+        return {"code": code, "in_jellyfin": False, "disabled": True}
+    params = {
+        "Recursive": "true",
+        "SearchTerm": str(code or "").upper(),
+        "IncludeItemTypes": "Movie,Video",
+        "Fields": "Path,ProviderIds,OriginalTitle,SortName",
+        "Limit": "20",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{conn['url']}/Items", headers=jellyfin_headers(conn), params=params, timeout=12) as resp:
+                if resp.status != 200:
+                    return {"code": code, "in_jellyfin": False, "error": f"HTTP {resp.status}"}
+                payload = await resp.json()
+    except Exception as exc:
+        return {"code": code, "in_jellyfin": False, "error": str(exc)}
+    items = payload.get("Items", []) if isinstance(payload, dict) else []
+    for item in items:
+        if isinstance(item, dict) and jellyfin_item_matches_code(item, code):
+            return {"code": code, "in_jellyfin": True, "item_id": item.get("Id"), "item_name": item.get("Name")}
+    return {"code": code, "in_jellyfin": False}
+
+
+async def jellyfin_codes_presence(codes):
+    unique = []
+    seen = set()
+    for code in codes or []:
+        c = str(code or "").upper().strip()
+        if c and c not in seen:
+            seen.add(c)
+            unique.append(c)
+    if not unique:
+        return {}
+    conn = await jellyfin_connection_settings(include_secret=True)
+    if not conn.get("enabled") or not conn.get("url") or not conn.get("api_key"):
+        return {c: {"in_jellyfin": False, "disabled": True} for c in unique}
+    results = await asyncio.gather(*(jellyfin_search_code(c) for c in unique))
+    return {str(r.get("code") or "").upper(): r for r in results if isinstance(r, dict)}
 
 
 def parse_size_to_bytes(size_str):
