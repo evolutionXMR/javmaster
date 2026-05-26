@@ -1062,6 +1062,40 @@ async def get_resource_state():
     return data
 
 
+async def mark_home_updates_seen():
+    state = await get_resource_state()
+    code_updates = len(state.get("updates", []))
+    actress_updates = len(state.get("actress_updates", []))
+    if code_updates or actress_updates:
+        state["updates"] = []
+        state["actress_updates"] = []
+        state["updates_seen_at"] = int(time.time())
+        await save_json(RESOURCE_STATE_FILE, state)
+    return {"cleared": code_updates + actress_updates, "code_updates": code_updates, "actress_updates": actress_updates}
+
+
+async def mark_actress_updates_seen():
+    items = await get_actress_watchlist()
+    cleared_items = 0
+    now = int(time.time())
+    for item in items:
+        if item.get("has_new_work"):
+            cleared_items += 1
+        item.pop("has_new_work", None)
+        item.pop("new_work_title", None)
+        item.pop("new_work_date", None)
+        item.pop("new_work_ts", None)
+    if cleared_items:
+        await save_actress_watchlist(items)
+    state = await get_resource_state()
+    actress_updates = len(state.get("actress_updates", []))
+    if actress_updates:
+        state["actress_updates"] = []
+        state["actress_updates_seen_at"] = now
+        await save_json(RESOURCE_STATE_FILE, state)
+    return {"cleared": cleared_items + actress_updates, "actresses": cleared_items, "actress_updates": actress_updates}
+
+
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
 
