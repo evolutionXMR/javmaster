@@ -1129,6 +1129,46 @@ async def find_download_task_by_code(code):
     return None
 
 
+def _download_task_label(task):
+    if not isinstance(task, dict):
+        return ""
+    return str(task.get("name") or task.get("title") or aria2_task_name(task) or task.get("id") or task.get("hash") or task.get("gid") or "")
+
+
+async def download_codes_presence(codes):
+    """Return download presence for codes across current downloader running/done lists.
+
+    Shape mirrors jellyfin_codes_presence enough for the actress UI: per code booleans
+    plus task label/status for tooltips/debugging. Running wins over done so an active
+    re-download is visible even if an older completed task remains in the done list.
+    """
+    wanted = []
+    for code in codes or []:
+        c = str(code or "").upper().strip()
+        if c and c not in wanted:
+            wanted.append(c)
+    result = {c: {"downloading": False, "download_done": False, "download_status": "", "download_task_name": ""} for c in wanted}
+    if not wanted:
+        return result
+    for status in ("running", "done"):
+        try:
+            tasks = await list_tasks(status)
+        except Exception:
+            tasks = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_status = str(task.get("status") or task.get("state") or status)
+            task_name = _download_task_label(task)
+            for code in wanted:
+                if task_matches_code(task, code):
+                    if status == "running":
+                        result[code].update({"downloading": True, "download_status": task_status, "download_task_name": task_name})
+                    elif not result[code].get("downloading"):
+                        result[code].update({"download_done": True, "download_status": task_status, "download_task_name": task_name})
+    return result
+
+
 async def wait_for_download_task(code, timeout=30, interval=2):
     deadline = time.time() + max(1, float(timeout or 30))
     while True:
@@ -1324,7 +1364,7 @@ async def refresh_actress_works(delay_seconds=3):
         item["refresh_order"] = idx + 1
         item["last_refresh_started"] = now
         try:
-            canonical, works, matched_query, warning = await fetch_actress_works(item.get("name", ""), limit=5)
+            canonical, works, matched_query, warning = await fetch_actress_works(item.get("name", ""), limit=50)
             if warning or not works:
                 item["last_checked"] = int(time.time())
                 item["last_error"] = warning or "No works"
@@ -1332,6 +1372,7 @@ async def refresh_actress_works(delay_seconds=3):
                 latest = works[0].get("code")
                 old_latest = item.get("latest_seen")
                 item["last_checked"] = int(time.time())
+                item["last_works"] = works[:50]
                 item.pop("last_error", None)
                 if latest and latest != old_latest:
                     item["latest_seen"] = latest

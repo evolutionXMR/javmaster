@@ -86,7 +86,15 @@ def format_size(bytes_val):
 
 # --- JAV 女优新作监控辅助 ---
 ACTRESS_WATCHLIST_FILE = os.environ.get('ACTRESS_WATCHLIST_FILE', f'{DATA_DIR}/actress_watchlist.json')
-from config import JAVBUS_BASE_URL
+try:
+    from config import AVWIKIDB_BASE_URL, FANZA_BASE_URL, JAVBUS_BASE_URL, JAVDB_BASE_URL, METADATA_SOURCE_ORDER, R18DEV_BASE_URL
+except ImportError:
+    from config import JAVBUS_BASE_URL
+    AVWIKIDB_BASE_URL = os.environ.get('AVWIKIDB_BASE_URL', 'https://avwikidb.com')
+    R18DEV_BASE_URL = os.environ.get('R18DEV_BASE_URL', 'https://r18.dev')
+    FANZA_BASE_URL = os.environ.get('FANZA_BASE_URL', 'https://www.dmm.co.jp')
+    JAVDB_BASE_URL = os.environ.get('JAVDB_BASE_URL', 'https://javdb.com')
+    METADATA_SOURCE_ORDER = os.environ.get('METADATA_SOURCE_ORDER', 'fanza,javdb,javbus,javlibrary')
 MAX_SEEK_ACTRESSES = 5
 MAX_SEEK_WORKS = 10
 
@@ -146,6 +154,23 @@ def strip_tags(raw: str) -> str:
     return re.sub(r'\s+', ' ', html.unescape(raw)).strip()
 
 
+def source_order_for_actress():
+    order = []
+    for item in re.split(r'[,\s]+', (METADATA_SOURCE_ORDER or 'fanza,javdb,javbus').lower()):
+        if item in {'avwikidb', 'r18dev', 'fanza', 'dmm', 'javdb', 'javbus'} and item not in order:
+            order.append(item)
+    return order or ['avwikidb', 'r18dev', 'fanza', 'javdb', 'javbus']
+
+
+def abs_url(url: str, base_url: str):
+    url = html.unescape(url or '').strip()
+    if url.startswith('//'):
+        return 'https:' + url
+    if url.startswith('/'):
+        return base_url.rstrip('/') + url
+    return url
+
+
 def parse_javbus_list(page_text: str):
     results = []
     for href, block in re.findall(r'<a class="movie-box" href="([^"]+)">(.*?)</a>', page_text, re.S):
@@ -156,28 +181,302 @@ def parse_javbus_list(page_text: str):
         release_date = html.unescape(dates[1]).strip() if len(dates) > 1 else ''
         title = html.unescape(title_m.group(1)).strip() if title_m else strip_tags(block)
         image = html.unescape(img_m.group(1)).strip() if img_m else ''
-        if image.startswith('//'):
-            image = 'https:' + image
-        elif image.startswith('/'):
-            image = JAVBUS_BASE_URL.rstrip('/') + image
+        image = abs_url(image, JAVBUS_BASE_URL)
         if not code or not CODE_RE.search(code):
             continue
         results.append({
             'code': code,
             'date': release_date,
             'title': title,
-            'url': href,
+            'url': abs_url(href, JAVBUS_BASE_URL),
             'image': image,
+            'source': 'javbus',
             'is_compilation': bool(COMPILATION_PATTERNS.search(title)),
         })
     return results
 
 
-async def fetch_text(session, url: str):
-    async with session.get(url, headers=javbus_headers(), timeout=20) as resp:
+def parse_javdb_list(page_text: str):
+    results = []
+    seen = set()
+    # JavDB cards are usually anchors to /v/<id>. Keep this broad so minor UI changes still work.
+    for href, block in re.findall(r'<a\b[^>]+href=["\']([^"\']*/v/[^"\']+)["\'][^>]*>(.*?)</a>', page_text, re.S | re.I):
+        text = strip_tags(block)
+        m = CODE_RE.search(text.upper())
+        if not m:
+            continue
+        code = m.group(0).upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        img = ''
+        img_m = re.search(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', block, re.S | re.I)
+        if img_m:
+            img = abs_url(img_m.group(1), JAVDB_BASE_URL)
+        date_m = DATE_RE.search(text)
+        title = text
+        if title.upper().startswith(code):
+            title = title[len(code):].strip(' -_') or text
+        results.append({
+            'code': code,
+            'date': date_m.group(0) if date_m else '',
+            'title': title,
+            'url': abs_url(href, JAVDB_BASE_URL),
+            'image': img,
+            'source': 'javdb',
+            'is_compilation': bool(COMPILATION_PATTERNS.search(title)),
+        })
+    return results
+
+
+def parse_fanza_list(page_text: str):
+    results = []
+    seen = set()
+    # FANZA search result cards link to detail pages; code is usually visible in the block text.
+    for href, block in re.findall(r'<a\b[^>]+href=["\']([^"\']*/detail/=[^"\']+)["\'][^>]*>(.*?)</a>', page_text, re.S | re.I):
+        text = strip_tags(block)
+        m = CODE_RE.search(text.upper())
+        if not m:
+            continue
+        code = m.group(0).upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        img = ''
+        img_m = re.search(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']', block, re.S | re.I)
+        if img_m:
+            img = abs_url(img_m.group(1), FANZA_BASE_URL)
+        date_m = DATE_RE.search(text)
+        title = text
+        if title.upper().startswith(code):
+            title = title[len(code):].strip(' -_') or text
+        results.append({
+            'code': code,
+            'date': date_m.group(0) if date_m else '',
+            'title': title,
+            'url': abs_url(href, FANZA_BASE_URL),
+            'image': img,
+            'source': 'fanza',
+            'is_compilation': bool(COMPILATION_PATTERNS.search(title)),
+        })
+    return results
+
+
+def _r18_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ('name', 'title', 'text', 'value'):
+            if value.get(key):
+                return str(value.get(key))
+    return ''
+
+
+def _walk_json_items(data):
+    if isinstance(data, list):
+        for item in data:
+            yield item
+    elif isinstance(data, dict):
+        # Common API shapes: {data: [...]}, {items: [...]}, {result: {items: [...]}}
+        yielded = False
+        for key in ('data', 'items', 'results', 'movies', 'videos'):
+            value = data.get(key)
+            if isinstance(value, list):
+                yielded = True
+                for item in value:
+                    yield item
+            elif isinstance(value, dict):
+                yielded = True
+                yield from _walk_json_items(value)
+        if not yielded and any(k in data for k in ('title', 'dvd_id', 'content_id', 'date')):
+            yield data
+
+
+def parse_r18dev_items(data):
+    results = []
+    seen = set()
+    for item in _walk_json_items(data):
+        if not isinstance(item, dict):
+            continue
+        raw_code = ''
+        for key in ('dvd_id', 'dvdId', 'product_id', 'productId', 'content_id', 'contentId', 'id'):
+            raw_code = _r18_text(item.get(key))
+            if CODE_RE.search(raw_code.upper()):
+                break
+        title = _r18_text(item.get('title') or item.get('name') or item.get('original_title'))
+        haystack = ' '.join([raw_code, title, _r18_text(item.get('url') or item.get('URL'))]).upper()
+        m = CODE_RE.search(haystack)
+        if not m:
+            continue
+        code = m.group(0).upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        date = _r18_text(item.get('date') or item.get('release_date') or item.get('releaseDate') or item.get('delivery_start_date'))
+        dm = DATE_RE.search(date)
+        image = _r18_text(item.get('image') or item.get('image_url') or item.get('jacket_full_url') or item.get('cover'))
+        url = _r18_text(item.get('url') or item.get('URL')) or (FANZA_BASE_URL.rstrip('/') + f'/search/=/searchstr={code}/')
+        results.append({
+            'code': code,
+            'date': dm.group(0) if dm else date,
+            'title': title or code,
+            'url': url,
+            'image': image,
+            'source': 'r18dev',
+            'is_compilation': bool(COMPILATION_PATTERNS.search(title or '')),
+        })
+    results.sort(key=lambda x: x.get('date') or '0000-00-00', reverse=True)
+    return results
+
+
+def parse_avwikidb_actor_page(page_text: str):
+    mt = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page_text, re.S | re.I)
+    if not mt:
+        return '', []
+    try:
+        payload = json.loads(html.unescape(mt.group(1)))
+    except Exception:
+        return '', []
+    props = payload.get('props', {}).get('pageProps', {})
+    actor = props.get('actor') or {}
+    canonical = _r18_text(actor.get('name'))
+    movies = props.get('movies') or []
+    results = []
+    seen = set()
+    for movie in movies:
+        if not isinstance(movie, dict):
+            continue
+        code = _r18_text(movie.get('adultVideoId') or movie.get('avid') or movie.get('dvdId')).upper()
+        m = CODE_RE.search(code)
+        if not m:
+            continue
+        code = m.group(0).upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        title = _r18_text(movie.get('title')) or code
+        date = _r18_text(movie.get('dateOfPublication') or movie.get('date') or movie.get('releaseDate'))[:10]
+        image = ''
+        for key in ('imageUrl', 'image', 'packageImage', 'jacketImage'):
+            image = _r18_text(movie.get(key))
+            if image:
+                break
+        if not image and movie.get('fanzaContentId'):
+            cid = str(movie.get('fanzaContentId'))
+            image = f'https://pics.dmm.co.jp/digital/video/{cid}/{cid}pl.jpg'
+        results.append({
+            'code': code,
+            'date': date,
+            'title': title,
+            'url': f"{AVWIKIDB_BASE_URL.rstrip('/')}/work/{code}/",
+            'image': image,
+            'source': 'avwikidb',
+            'is_compilation': bool(COMPILATION_PATTERNS.search(title or '')),
+        })
+    results.sort(key=lambda x: x.get('date') or '0000-00-00', reverse=True)
+    return canonical, results
+
+
+async def fetch_avwikidb_works(session, variant: str):
+    base = AVWIKIDB_BASE_URL.rstrip('/')
+    headers = {**javbus_headers(), 'Referer': base + '/'}
+    # AVWikiDB search serves the canonical actor page. The actor landing page only
+    # includes a small mixed preview; fetch /works/?filter=single to get the latest
+    # normal single-actress works instead of falling back to JavBus prematurely.
+    urls = [
+        f"{base}/search?q={quote(variant, safe='')}",
+        f"{base}/actor/?q={quote(variant, safe='')}",
+    ]
+    for url in urls:
+        try:
+            text, status = await fetch_text(session, url, headers=headers)
+        except Exception:
+            text, status = None, None
+        if not text:
+            continue
+        actor_path = ''
+        m = re.search(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']https?://[^/]+(/actor/\d+/)["\']', text, re.I)
+        if m:
+            actor_path = m.group(1)
+        if not actor_path:
+            m = re.search(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https?://[^/]+(/actor/\d+/)["\']', text, re.I)
+            if m:
+                actor_path = m.group(1)
+        fetch_texts = [text]
+        if actor_path:
+            works_url = f"{base}{actor_path}works/?filter=single"
+            try:
+                works_text, _ = await fetch_text(session, works_url, headers=headers)
+                if works_text:
+                    fetch_texts.insert(0, works_text)
+            except Exception:
+                pass
+        for candidate_text in fetch_texts:
+            canonical, works = parse_avwikidb_actor_page(candidate_text)
+            if works:
+                return canonical or variant, works
+    return variant, []
+
+
+async def fetch_r18dev_works(session, variant: str):
+    # r18.dev mirrors DMM/FANZA metadata as JSON and often works when FANZA pages are geo-blocked.
+    # Try several query names because deployments/API versions differ; failures simply fall back.
+    headers = {**javbus_headers(), 'Accept': 'application/json'}
+    base = R18DEV_BASE_URL.rstrip('/')
+    endpoints = [
+        f"{base}/videos/vod/movies?keyword={quote(variant, safe='')}",
+        f"{base}/videos/vod/movies?actress={quote(variant, safe='')}",
+        f"{base}/videos/vod/movies?q={quote(variant, safe='')}",
+    ]
+    for url in endpoints:
+        try:
+            async with session.get(url, headers=headers, timeout=20) as resp:
+                if resp.status != 200:
+                    continue
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    continue
+                works = parse_r18dev_items(data)
+                if works:
+                    return works
+        except Exception:
+            continue
+    return []
+
+
+async def fetch_text(session, url: str, headers=None):
+    async with session.get(url, headers=headers or javbus_headers(), timeout=20) as resp:
         if resp.status != 200:
             return None, resp.status
         return await resp.text(), resp.status
+
+
+def merge_works(existing, new_items):
+    by_code = {item.get('code'): item for item in existing if item.get('code')}
+    for item in new_items:
+        code = item.get('code')
+        if not code:
+            continue
+        old = by_code.get(code)
+        if not old:
+            by_code[code] = item
+            continue
+        # Prefer the earlier/higher-priority source. Only fill fields that are missing.
+        merged = dict(old)
+        source_chain = list(merged.get('source_chain') or ([merged.get('source')] if merged.get('source') else []))
+        if item.get('source') and item.get('source') not in source_chain:
+            source_chain.append(item.get('source'))
+        for key in ('title', 'url', 'image', 'date', 'source'):
+            if item.get(key) and not merged.get(key):
+                merged[key] = item[key]
+        if source_chain:
+            merged['source_chain'] = source_chain
+        merged['is_compilation'] = bool(old.get('is_compilation') or item.get('is_compilation'))
+        by_code[code] = merged
+    works = list(by_code.values())
+    works.sort(key=lambda x: x.get('date') or '0000-00-00', reverse=True)
+    return works
 
 
 async def fetch_actress_works(query: str, limit: int = 5):
@@ -187,31 +486,53 @@ async def fetch_actress_works(query: str, limit: int = 5):
         return None, [], None, '名字不能为空。'
 
     matches = []
+    headers_fanza = {**javbus_headers(), 'Cookie': 'age_check_done=1; ckcy=1', 'Referer': FANZA_BASE_URL.rstrip('/') + '/'}
     async with aiohttp.ClientSession() as session:
         for variant in actress_query_variants(query):
-            url = f"{JAVBUS_BASE_URL}/search/{quote(variant, safe='')}&type=1"
-            text, status = await fetch_text(session, url)
-            if not text:
-                continue
-            works = parse_javbus_list(text)
-            if not works:
-                continue
-
-            # 详情页更可信：从第一条作品中提取站点显示的演员名，作为 canonical name。
+            combined = []
             canonical = variant
-            detail_text, _ = await fetch_text(session, works[0]['url'])
-            if detail_text:
-                actor_candidates = re.findall(r'<a[^>]+href="[^"]*/star/[^"]+"[^>]*>(.*?)</a>', detail_text, re.S)
-                clean_actors = [strip_tags(a) for a in actor_candidates if strip_tags(a)]
-                for actor in clean_actors:
-                    if variant in actor or actor in variant or query in actor:
-                        canonical = actor
-                        break
-                else:
-                    if clean_actors:
-                        canonical = clean_actors[-1]
-            first_date = works[0].get('date') or '0000-00-00'
-            matches.append((first_date, canonical, works[:limit], variant))
+            for source in source_order_for_actress():
+                try:
+                    if source == 'avwikidb':
+                        canonical_from_source, works = await fetch_avwikidb_works(session, variant)
+                        if works and canonical_from_source:
+                            canonical = canonical_from_source
+                    elif source == 'r18dev':
+                        works = await fetch_r18dev_works(session, variant)
+                    elif source in {'fanza', 'dmm'}:
+                        url = f"{FANZA_BASE_URL.rstrip('/')}/search/=/searchstr={quote(variant, safe='')}/"
+                        text, status = await fetch_text(session, url, headers=headers_fanza)
+                        works = parse_fanza_list(text or '') if text else []
+                    elif source == 'javdb':
+                        url = f"{JAVDB_BASE_URL.rstrip('/')}/search?q={quote(variant, safe='')}&f=all"
+                        text, status = await fetch_text(session, url)
+                        works = parse_javdb_list(text or '') if text else []
+                    elif source == 'javbus':
+                        url = f"{JAVBUS_BASE_URL.rstrip('/')}/search/{quote(variant, safe='')}&type=1"
+                        text, status = await fetch_text(session, url)
+                        works = parse_javbus_list(text or '') if text else []
+                        if works:
+                            # 详情页更可信：从第一条作品中提取站点显示的演员名，作为 canonical name。
+                            detail_text, _ = await fetch_text(session, works[0]['url'])
+                            if detail_text:
+                                actor_candidates = re.findall(r'<a[^>]+href="[^"]*/star/[^"]+"[^>]*>(.*?)</a>', detail_text, re.S)
+                                clean_actors = [strip_tags(a) for a in actor_candidates if strip_tags(a)]
+                                for actor in clean_actors:
+                                    if variant in actor or actor in variant or query in actor:
+                                        canonical = actor
+                                        break
+                                else:
+                                    if clean_actors:
+                                        canonical = clean_actors[-1]
+                    else:
+                        works = []
+                except Exception:
+                    works = []
+                if works:
+                    combined = merge_works(combined, works)
+            if combined:
+                first_date = combined[0].get('date') or '0000-00-00'
+                matches.append((first_date, canonical, combined[:limit], variant))
 
     if matches:
         # 多个别名都能命中时，选择最新发售日，避免“河北彩花”旧名漏掉“河北彩伽”新作。
@@ -220,7 +541,6 @@ async def fetch_actress_works(query: str, limit: int = 5):
         return canonical, works, variant, None
 
     return None, [], None, f"找不到女优 `{query}`。请尽量使用日文名，例如 `星宮一花`；如果是简体名我会自动尝试常见转换。"
-
 
 async def load_actress_watchlist():
     data = await load_json(ACTRESS_WATCHLIST_FILE)
