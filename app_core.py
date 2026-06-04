@@ -46,6 +46,7 @@ DEFAULT_SETTINGS = {
     "actress_search_daily_time": "09:30",
     "preview_images": True,
     "auto_remove_code_after_push": False,
+    "download_completion_notify_enabled": True,
     # Downloader connection overrides. Empty secrets mean use saved/config fallback.
     "download_client": "gopeed",  # gopeed | qbittorrent | aria2
     "gopeed_url": GOPEED_URL,
@@ -164,6 +165,7 @@ async def get_settings():
     merged["aria2_secret_set"] = bool(settings.get("aria2_secret"))
     merged["scrape_output_path"] = str(merged.get("scrape_output_path") or "/downloads/JAV_Sorted")
     merged["scrape_remove_task_after_success"] = bool(merged.get("scrape_remove_task_after_success", False))
+    merged["download_completion_notify_enabled"] = bool(merged.get("download_completion_notify_enabled", True))
     merged["jellyfin_enabled"] = bool(merged.get("jellyfin_enabled", False))
     merged["jellyfin_url"] = str(merged.get("jellyfin_url") or "").rstrip("/")
     merged["jellyfin_api_key_set"] = bool(settings.get("jellyfin_api_key"))
@@ -187,6 +189,7 @@ async def save_settings(payload):
         "qbittorrent_url", "qbittorrent_username", "qbittorrent_download_path",
         "aria2_url", "aria2_download_path",
         "scrape_output_path", "scrape_remove_task_after_success",
+        "download_completion_notify_enabled",
         "jellyfin_enabled", "jellyfin_url",
     }
     for key in allowed:
@@ -620,8 +623,8 @@ async def get_config_summary():
     return {"ok": False, "client": client, "error": "unsupported client"}
 
 
-async def list_tasks(status="running"):
-    client = await selected_download_client()
+async def list_tasks(status="running", download_client=None):
+    client = await selected_download_client(download_client)
     if client == "gopeed":
         statuses = ["done"] if status == "done" else ["running", "pause", "wait", "ready"]
         out = []
@@ -735,9 +738,9 @@ def aria2_task_name(t):
     return t.get("gid") or "未命名任务"
 
 
-async def task_display_rows(status="running"):
-    client = await selected_download_client()
-    tasks = await list_tasks(status)
+async def task_display_rows(status="running", download_client=None):
+    client = await selected_download_client(download_client)
+    tasks = await list_tasks(status, client)
     rows = []
     for t in tasks:
         if client == "gopeed":
@@ -750,14 +753,64 @@ async def task_display_rows(status="running"):
             downloaded = progress.get("downloaded", 0) or 0
             name = t.get("name") or detail.get("name") or "未命名任务"
             pct = round(downloaded / total * 100, 1) if total else 0
-            rows.append({"id": task_id, "name": name, "short_name": name[:120], "status": detail.get("status") or t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(progress.get("speed", 0)) + "/s", "upload_speed_text": format_size(progress.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": stats.get("activePeers", 0) or 0, "total_peers": stats.get("totalPeers", 0) or 0})
+            rows.append({"id": task_id, "name": name, "short_name": name[:120], "status": detail.get("status") or t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(progress.get("speed", 0)) + "/s", "upload_speed_text": format_size(progress.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": stats.get("activePeers", 0) or 0, "total_peers": stats.get("totalPeers", 0) or 0, "client": client})
         elif client == "qbittorrent":
             total = int(t.get("size") or 0); downloaded = int(float(t.get("progress") or 0) * total); pct = round(float(t.get("progress") or 0) * 100, 1)
-            rows.append({"id": t.get("hash"), "name": t.get("name") or "未命名任务", "short_name": (t.get("name") or "未命名任务")[:120], "status": t.get("state") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("dlspeed", 0)) + "/s", "upload_speed_text": format_size(t.get("upspeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("num_leechs", 0) or 0, "total_peers": t.get("num_seeds", 0) or 0})
+            rows.append({"id": t.get("hash"), "name": t.get("name") or "未命名任务", "short_name": (t.get("name") or "未命名任务")[:120], "status": t.get("state") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("dlspeed", 0)) + "/s", "upload_speed_text": format_size(t.get("upspeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("num_leechs", 0) or 0, "total_peers": t.get("num_seeds", 0) or 0, "client": client})
         elif client == "aria2":
             total = int(t.get("totalLength") or 0); downloaded = int(t.get("completedLength") or 0); pct = round(downloaded / total * 100, 1) if total else 0; name = aria2_task_name(t)
-            rows.append({"id": t.get("gid"), "name": name, "short_name": name[:120], "status": t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("downloadSpeed", 0)) + "/s", "upload_speed_text": format_size(t.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("connections", 0) or 0, "total_peers": t.get("numSeeders", 0) or 0})
+            rows.append({"id": t.get("gid"), "name": name, "short_name": name[:120], "status": t.get("status") or status, "progress": pct, "progress_text": f"{pct}% ({format_size(downloaded)} / {format_size(total)})", "download_speed_text": format_size(t.get("downloadSpeed", 0)) + "/s", "upload_speed_text": format_size(t.get("uploadSpeed", 0)) + "/s", "downloaded_text": format_size(downloaded), "total_size_text": format_size(total), "active_peers": t.get("connections", 0) or 0, "total_peers": t.get("numSeeders", 0) or 0, "client": client})
     return rows
+
+
+def _download_completion_key(row):
+    tid = str(row.get("id") or "").strip()
+    name = str(row.get("name") or "").strip()
+    client = str(row.get("client") or "").strip()
+    if tid:
+        return f"{client}:{tid}"
+    return f"{client}:name:{hashlib.sha1(name.encode('utf-8')).hexdigest()}"
+
+
+async def check_download_completion_notifications():
+    """Detect newly completed tasks for the active downloader.
+
+    The first run per downloader only records a baseline so old completed rows do
+    not spam Discord. Later runs return only newly completed task rows.
+    """
+    settings = await get_settings()
+    client = await selected_download_client()
+    state = await get_resource_state()
+    notify = state.setdefault("download_completion_notify", {})
+    clients = notify.setdefault("clients", {})
+    client_state = clients.setdefault(client, {"initialized": False, "seen": {}})
+    try:
+        rows = await task_display_rows("done", client)
+    except Exception as exc:
+        client_state["last_error"] = str(exc)
+        await save_json(RESOURCE_STATE_FILE, state)
+        return {"enabled": bool(settings.get("download_completion_notify_enabled", True)), "client": client, "initialized": bool(client_state.get("initialized")), "new": [], "error": str(exc)}
+    now = int(time.time())
+    current = {_download_completion_key(r): r for r in rows}
+    seen = client_state.get("seen") if isinstance(client_state.get("seen"), dict) else {}
+    if not client_state.get("initialized"):
+        client_state["seen"] = {k: now for k in current}
+        client_state["initialized"] = True
+        client_state["last_checked"] = now
+        await save_json(RESOURCE_STATE_FILE, state)
+        return {"enabled": bool(settings.get("download_completion_notify_enabled", True)), "client": client, "initialized": False, "new": [], "baseline_count": len(current)}
+    new_rows = []
+    for key, row in current.items():
+        if key not in seen:
+            new_rows.append(row)
+        seen[key] = now
+    if len(seen) > 500:
+        seen = dict(sorted(seen.items(), key=lambda kv: kv[1], reverse=True)[:500])
+    client_state["seen"] = seen
+    client_state["last_checked"] = now
+    client_state.pop("last_error", None)
+    await save_json(RESOURCE_STATE_FILE, state)
+    return {"enabled": bool(settings.get("download_completion_notify_enabled", True)), "client": client, "initialized": True, "new": new_rows, "baseline_count": len(current)}
 
 
 MEDIA_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.rmvb', '.wmv', '.mov', '.flv', '.ts', '.webm', '.iso'}

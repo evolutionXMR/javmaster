@@ -30,6 +30,8 @@ class DownloadBot(discord.Client):
         print("✅ Slash commands synced!")
         if not code_search_scheduler.is_running():
             code_search_scheduler.start()
+        if not download_completion_scheduler.is_running():
+            download_completion_scheduler.start()
 
 bot = DownloadBot()
 
@@ -783,6 +785,42 @@ async def code_search_scheduler():
 
 @code_search_scheduler.before_loop
 async def before_code_search_scheduler():
+    await bot.wait_until_ready()
+
+
+
+def format_download_completion_message(client, rows):
+    label = {"gopeed": "Gopeed", "qbittorrent": "qBittorrent", "aria2": "Aria2"}.get(client, client)
+    lines = [f"**✅ 下载完成 ({label})**"]
+    for row in rows[:10]:
+        name = str(row.get("name") or row.get("short_name") or "未命名任务")
+        size = row.get("total_size_text") or row.get("progress_text") or ""
+        tid = row.get("id") or ""
+        suffix = f" | {size}" if size else ""
+        task_suffix = f" | `{tid}`" if tid else ""
+        lines.append(f"• **{name[:120]}**{suffix}{task_suffix}")
+    if len(rows) > 10:
+        lines.append(f"…还有 {len(rows)-10} 个完成任务")
+    return "\n".join(lines)[:1990]
+
+
+@tasks.loop(minutes=1)
+async def download_completion_scheduler():
+    import app_core
+    settings = await app_core.get_settings()
+    if not settings.get("download_completion_notify_enabled", True):
+        return
+    result = await app_core.check_download_completion_notifications()
+    rows = result.get("new") or []
+    if not rows:
+        return
+    channel = bot.get_channel(REPORT_CHANNEL_ID)
+    if channel:
+        await channel.send(format_download_completion_message(result.get("client"), rows))
+
+
+@download_completion_scheduler.before_loop
+async def before_download_completion_scheduler():
     await bot.wait_until_ready()
 
 @bot.tree.command(name="add", description="批量添加代号")

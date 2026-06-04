@@ -39,8 +39,9 @@ JAVMASTER_RESOURCE_STATE_FILE = env("JAVMASTER_RESOURCE_STATE_FILE", f"{DATA_DIR
 CLEANUP_PATH = env("CLEANUP_PATH", "/downloads")
 
 # Metadata sources. METADATA_SOURCE_ORDER controls scrape fallback order.
-# Recommended default: official FANZA/DMM first, then JavDB, JavBus, JavLibrary.
-METADATA_SOURCE_ORDER = env("METADATA_SOURCE_ORDER", "avwikidb,r18dev,fanza,javdb,javbus,javlibrary")
+# Default skips official FANZA/DMM because it can return age/region-block pages from AU,
+# which are not valid movie metadata for automated scraping.
+METADATA_SOURCE_ORDER = env("METADATA_SOURCE_ORDER", "javdb,javbus,javlibrary")
 AVWIKIDB_BASE_URL = env("AVWIKIDB_BASE_URL", "https://avwikidb.com")
 R18DEV_BASE_URL = env("R18DEV_BASE_URL", "https://r18.dev")
 FANZA_BASE_URL = env("FANZA_BASE_URL", "https://www.dmm.co.jp")

@@ -20,7 +20,7 @@ except ImportError:  # Backward compatibility with older config.py in portable b
     FANZA_BASE_URL = os.environ.get("FANZA_BASE_URL", "https://www.dmm.co.jp")
     JAVDB_BASE_URL = os.environ.get("JAVDB_BASE_URL", "https://javdb.com")
     JAVLIBRARY_BASE_URL = os.environ.get("JAVLIBRARY_BASE_URL", "https://www.javlibrary.com")
-    METADATA_SOURCE_ORDER = os.environ.get("METADATA_SOURCE_ORDER", "fanza,javdb,javbus,javlibrary")
+    METADATA_SOURCE_ORDER = os.environ.get("METADATA_SOURCE_ORDER", "javdb,javbus,javlibrary")
 
 CODE_RE = re.compile(r"\b([A-Z]{2,8}-\d{2,5}|FC2-?PPV-?\d{5,8}|FC2-?\d{5,8})(CH)?(?![A-Z0-9])", re.I)
 HEADERS = {
@@ -215,7 +215,23 @@ def _dmm_field(page: str, labels: tuple[str, ...], links_only: bool = False) -> 
     return []
 
 
+def _is_fanza_blocked_page(page: str) -> bool:
+    text = _strip_tags(page)
+    lowered = text.lower()
+    blocked_markers = (
+        "年齢認証",
+        "年齢確認",
+        "age verification",
+        "お住まいの地域からご利用になれません",
+        "not available in your region",
+        "this content is not available in your region",
+    )
+    return any(marker.lower() in lowered for marker in blocked_markers)
+
+
 def parse_fanza_detail(page: str, code: str, url: str) -> dict:
+    if _is_fanza_blocked_page(page):
+        raise ValueError("FANZA/DMM 返回年龄认证或地区限制页面")
     title = (_strip_tags(_first_group(r"<h1[^>]*[^>]*>(.*?)</h1>", page))
              or _strip_tags(_first_group(r"<title[^>]*>(.*?)</title>", page)))
     title = re.sub(r"\s*-\s*FANZA.*$", "", title, flags=re.I).strip()
@@ -378,13 +394,13 @@ FETCHERS = {
 
 
 def metadata_source_order() -> list[str]:
-    raw = METADATA_SOURCE_ORDER or "fanza,javdb,javbus,javlibrary"
+    raw = METADATA_SOURCE_ORDER or "javdb,javbus,javlibrary"
     order = []
     for item in re.split(r"[,\s]+", raw.lower()):
         item = item.strip()
         if item in FETCHERS and item not in order:
             order.append(item)
-    return order or ["fanza", "javdb", "javbus", "javlibrary"]
+    return order or ["javdb", "javbus", "javlibrary"]
 
 
 async def fetch_metadata(code: str) -> dict:

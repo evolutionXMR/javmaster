@@ -21,7 +21,7 @@ JavMaster 是一个自托管的 FastAPI + Discord.py JAV 管理面板，用来�
 - JavBus 元数据与预览图代理：尽量减少浏览器热链 / 防盗链导致的图片加载失败。
 - 下载完成列表支持一键刮削：识别完成任务中的视频文件，抓取元数据，生成 NFO 与图片，并移动到整理目录。
 - 刮削成功后可选自动从下载完成列表删除任务记录；删除任务记录时不会删除已整理好的影片文件。
-- 下载后清理工具：保护 `.part` 未完成文件，并排除 `JAV_Sorted`、`toBeSorted`、`MDC_Failed`、`Chinese_Sorted` 等已整理 / 中间目录。
+- 下载后清理工具：保护 `.part` 未完成文件，并排除 `JAV_Sorted`、`toBeSorted`、`Chinese_Sorted` 等已整理 / 中间目录。
 - Docker Compose 部署，支持 `data` 与 `downloads` 持久化挂载。
 
 
@@ -248,7 +248,7 @@ JavMaster is a self-hosted FastAPI + Discord.py control panel for managing JAV c
 - JavBus metadata and preview-image proxy to reduce hotlink / anti-leech image failures.
 - One-click scraping from the completed-download list: detect the completed video, fetch metadata, write NFO/images, and move the movie into the sorted library.
 - Optional removal of the completed downloader task record after successful scraping; this does not delete the sorted movie file.
-- Cleanup helper that protects `.part` files and excludes sorted/intermediate folders such as `JAV_Sorted`, `toBeSorted`, `MDC_Failed`, and `Chinese_Sorted`.
+- Cleanup helper that protects `.part` files and excludes sorted/intermediate folders such as `JAV_Sorted`, `toBeSorted` and `Chinese_Sorted`.
 - Docker Compose deployment with persistent `data` and `downloads` volumes.
 
 
